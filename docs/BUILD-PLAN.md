@@ -1,4 +1,4 @@
-# Vox Sonus — build plan
+# Awaaz — build plan
 
 Written 26 August 2026. Hackathon runs **1–30 September 2026**; submissions close
 **30 September, 8:00 PM PKT**. That is five weeks, and roughly one of them is already

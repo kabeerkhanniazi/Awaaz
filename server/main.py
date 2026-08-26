@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Vox Sonus - the web server.
+"""Awaaz - the web server.
 
     python server/main.py
 
@@ -44,7 +44,7 @@ MAX_BODY = 256 * 1024
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "VoxSonus"
+    server_version = "Awaaz"
 
     # --- plumbing ---------------------------------------------------------
 
@@ -187,7 +187,7 @@ def main():
                 raise
             port += 1
 
-    print(f"  Vox Sonus running at  http://localhost:{port}", flush=True)
+    print(f"  Awaaz running at  http://localhost:{port}", flush=True)
     print(f"  {len(agent_defs.AGENTS)} agents  ·  Ctrl-C to stop\n")
     try:
         httpd.serve_forever()

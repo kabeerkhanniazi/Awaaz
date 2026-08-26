@@ -793,3 +793,11 @@
 /* A last line of defence: nothing may cause a horizontal scrollbar. Clip
    rather than hidden so position:sticky on the nav still works. */
 #app { overflow-x: clip; }
+
+/* Inter carries no Arabic glyphs, so the Urdu wordmark needs its own stack. */
+.urdu {
+  font-family: "Noto Nastaliq Urdu", "Noto Naskh Arabic", "Segoe UI",
+               "Tahoma", serif;
+  font-size: 1.05em;
+  line-height: 1;
+}

@@ -1,4 +1,6 @@
-# Vox Sonus
+# Awaaz
+
+**آواز** — Urdu for *voice*.
 
 Five voice agents you can call in a browser, built on the **AssemblyAI Voice Agent API**
 for the [AssemblyAI Voice Agent Hackathon](https://lablab.ai/ai-hackathons/assemblyai-voice-agent-hackathon)
