@@ -103,23 +103,25 @@ can never drift.
 
 ---
 
-## A straight answer about Urdu
+## Why English only
 
-The Voice Agent API transcribes 18 input languages. **Urdu is not one of them, and there is
-no Urdu output voice.** Building this on a claim that it was would have fallen apart the
-first time someone spoke into it.
+We built the bilingual version first, listened to it, and cut it.
 
-What is supported is **Hindi**. Spoken conversational Urdu and Hindi are the same language
-in the mouth — they share their phonology and nearly all of their everyday vocabulary, and
-diverge in script and formal register, neither of which survives a phone call. So input is
-steered with `language_codes: ["en", "hi"]`, which is what actually captures the
-Urdu-English code-switching people use, and *"mujhe kal subah ki appointment chahiye"*
-transcribes correctly. The agents reply in English, keeping the Urdu words a caller uses.
+An earlier build steered recognition with `language_codes: ["en", "hi"]`, on the reasoning
+that spoken Urdu and Hindi share their phonology and everyday vocabulary. **The recognition
+side held up well. The output voice did not.** The Voice Agent API's voices are trained on
+European-language phonology; handed South Asian vocabulary they produce an accent awkward
+enough to undercut everything else on the call. An agent that mispronounces the caller's own
+words sounds materially worse than one that simply speaks good English.
 
-AssemblyAI lists Hindi output voices as on the roadmap. When they ship, these agents become
-natively bilingual by changing one field in `agent_defs.py`.
+So the agents run `language_codes: ["en"]` and speak English throughout.
 
----
+This costs less than it might appear. Pakistani commercial phone lines already run
+substantially in English — private clinics, B2B distribution, corporate IT desks. AssemblyAI
+lists Hindi voices as on the roadmap; when they ship, this is one field in
+`server/agent_defs.py` and a decision worth reopening.
+
+The name stayed. Awaaz is Urdu for voice.
 
 ## Design
 
@@ -143,11 +145,11 @@ illegible. Amplitude comes from an `AnalyserNode` on whichever side currently ow
 
 Each agent's Briefing tab lists prompts that exercise its tools. A few to start with:
 
-- **Northgate** — *"Mujhe kal subah ki appointment chahiye"*, then give a name and number.
-- **Meridian** — *"Order eight eight four five zero ka status batao"* (that one is delayed).
-- **Corvus** — *"Mera internet subah se band hai"*, number `0300 1234567` (a live outage).
+- **Northgate** — *"I need an appointment tomorrow morning"*, then give a name and number.
+- **Meridian** — *"What is the status of order eight eight four five zero"* (that one is delayed).
+- **Corvus** — *"My internet has been down since this morning"*, number `0300 1234567` (a live outage).
 - **Halden** — *"I'm locked out, employee ID H G one zero four two"*.
-- **Buddy** — *"Yaar aaj bohot lamba din tha"*.
+- **Buddy** — *"Today was a really long day"*.
 
 Watch the **Tool calls** tab while you talk: every call, its arguments and the raw result
 appear as they happen.

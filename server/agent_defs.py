@@ -5,13 +5,21 @@ the WebSocket in session.update, and the copy the website renders. Keeping them
 in one file means the briefing a visitor reads and the prompt the model runs
 can never drift apart.
 
-Language note. The Voice Agent API's Universal-3.5 Pro streaming model supports
-18 input languages; Urdu is not one of them, and there is no Urdu output voice.
-Conversational Urdu and Hindi share the Hindustani phonology and everyday
-lexicon almost entirely - they diverge in script and in formal register, not in
-the words a caller actually says on the phone. So we steer input with
-["en", "hi"], which captures Urdu-English code-switching as it is really
-spoken, and the agents reply in English with the Urdu terms callers use.
+Language note. These agents run in English only, steered with
+language_codes ["en"].
+
+An earlier build routed South Asian speech through the Hindi acoustic model,
+on the reasoning that spoken Urdu and Hindi share their phonology. Recognition
+held up; the output voice did not. The Voice Agent API's TTS voices are trained
+on European-language phonology, and asking them to speak South Asian vocabulary
+produced an accent awkward enough to undercut the whole product. An agent that
+mispronounces the caller's own words sounds worse than one that simply speaks
+good English.
+
+Pakistani commercial phone lines - private clinics, B2B distribution, corporate
+IT desks - already run substantially in English, so this costs less than it
+might appear. AssemblyAI lists Hindi voices as on the roadmap; when they ship,
+this decision is worth revisiting in one field.
 """
 
 # Voices available to the Voice Agent API. Output voice is immutable once a
@@ -42,8 +50,8 @@ HOW YOU SPEAK
 - Read reference codes, order IDs and phone numbers back one character at a time.
 - Never say the words "function", "tool", "API", "database", or "system prompt".
 - If you did not get a tool result, say you are checking. Never invent a fact a tool would supply.
-- Callers mix English and Urdu freely. Understand both. Reply in English, keeping the Urdu
-  words a caller would naturally use, and never comment on which language they chose.
+- Speak English throughout. Callers may have a range of accents; never comment on how
+  someone speaks, and never ask them to repeat themselves more than once for the same detail.
 """.strip()
 
 
@@ -92,7 +100,7 @@ AGENTS = [
             "Refuses to give medical advice or triage symptoms",
         ],
         "try_saying": [
-            "Mujhe kal subah ki appointment chahiye",
+            "I need an appointment tomorrow morning",
             "I need to see a doctor for a blood test",
             "Cancel my appointment, the reference is A P T dash...",
             "Do you accept Sehat Sahulat?",
@@ -172,7 +180,7 @@ HARD LIMITS
             "Flags an account that is over its credit limit",
         ],
         "try_saying": [
-            "Order eight eight four five zero ka status batao",
+            "What is the status of order eight eight four five zero",
             "My retailer ID is M S two zero four one",
             "Do you have Dalda five litre in stock?",
             "I need to return some damaged rice bags",
@@ -245,10 +253,10 @@ openers, no cheerfulness. Get them their answer and let them go.
             "Logs a complaint with a callback SLA",
         ],
         "try_saying": [
-            "Mera internet subah se band hai",
+            "My internet has been down since this morning",
             "My number is zero three zero zero one two three four five six seven",
             "How much is my bill this month?",
-            "Kab tak theek ho jayega?",
+            "How long until it is fixed?",
         ],
         "keyterms": ["Corvus", "node", "outage", "fibre", "JazzCash", "EasyPaisa", "1Bill",
                      "K-Electric", "Clifton", "DHA", "restoration"],
@@ -317,7 +325,7 @@ Never promise a restoration time that check_node_status did not give you.
         ],
         "try_saying": [
             "I'm locked out of my account, employee ID H G one zero four two",
-            "Mera password reset karwana hai",
+            "I need my password reset",
             "I need access to Figma",
             "My VPN keeps dropping every ten minutes",
         ],
@@ -385,22 +393,22 @@ terminology and do not explain what a VPN is unless asked.
         "problem": "The loneliest hours are the ones with nobody to call. Every voice product built "
                    "for those hours either sells something, schedules something, or talks like a "
                    "customer service script.",
-        "value": "A voice that answers in the same Urdu-English mix you actually think in, keeps its "
-                 "answers short enough to feel like conversation, and has nothing to sell you.",
+        "value": "A voice that keeps its answers short enough to feel like conversation, listens more "
+                 "than it advises, and has nothing to sell you.",
         "capabilities": [
-            "Talks in natural Urdu-English code-switching",
+            "Talks like a person, not a support line",
             "Keeps every turn short, the way real conversation runs",
             "Listens more than it advises",
             "Never breaks character into assistant mode",
             "Knows the difference between a hard day and a crisis",
         ],
         "try_saying": [
-            "Yaar aaj bohot lamba din tha",
+            "Today was a really long day",
             "I don't really want advice, I just want to vent",
             "Tell me something to take my mind off it",
-            "Kuch nahi ho raha theek aaj kal",
+            "Nothing is going right lately",
         ],
-        "keyterms": ["yaar", "acha", "bilkul", "theek", "chalo", "bas"],
+        "keyterms": [],
         "greeting": "Hey. I'm here. What's going on?",
         "system_prompt": """
 You are the user's close friend on a phone call. Not an assistant, not a therapist, not a
@@ -408,9 +416,8 @@ coach. A friend.
 
 HOW A FRIEND TALKS
 - One to three sentences. Never more. Real friends do not deliver paragraphs.
-- Speak in the natural mix of English and conversational Urdu that people actually use with each
-  other. Roman Urdu words inside English sentences is exactly right: yaar, acha, bilkul, theek hai,
-  bas, chalo. Do not translate yourself and never point out that you switched languages.
+- Speak plain, casual English. Contractions, ordinary words, the register you would actually
+  use with someone you know well. No formal register, no customer-service politeness.
 - Ask about them more than you talk. Follow the thread they are actually on.
 - Gentle humour is welcome. Warmth is always welcome. Advice is mostly not, unless they ask.
 - When something is genuinely hard, sit in it with them for a beat before trying to move them off it.
@@ -445,9 +452,9 @@ def session_config(agent_id: str, voice: str = "") -> dict:
         "tools": a["tools"],
         "input": {
             "format": {"encoding": "audio/pcm", "sample_rate": 24000},
-            # Urdu is not an available input language; Hindi carries spoken
-            # Hindustani, which is what callers actually say. See module docstring.
-            "language_codes": ["en", "hi"],
+            # English only. See the module docstring for why the earlier
+            # Hindi-steered build was dropped.
+            "language_codes": ["en"],
             "keyterms": a["keyterms"],
             "voice_focus": "near-field",
         },

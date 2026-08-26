@@ -32,8 +32,8 @@ brief changed to a website. Three reasons:
 
 **What was kept from the report:** every system prompt (hardened for voice and tool use),
 the four commercial concepts and their Pakistani market rationale, the Buddy persona, and
-the code-switching requirement — which turned out to be the hardest and most interesting
-constraint. See *Risk 1* below.
+and the Pakistani market rationale. The bilingual requirement was built, tested and then
+cut — see *The language decision* below.
 
 The edge pipeline is not wasted. It is the right answer for a follow-on offline device,
 and it is worth one slide in the deck as the roadmap.
@@ -91,11 +91,10 @@ supply. See Phase 2.
      finish complaining.
    - Halden: `HG-1042` is deliberately locked; `HG-3901` has no MFA and must be refused
      a phone reset.
-   - Buddy: talk to it in Roman Urdu and see whether it stays in character.
+   - Buddy: talk to it for a minute and see whether it stays in character.
 
-**What to report back:** whether the agents call the right tools unprompted, whether
-barge-in feels instant, and — most importantly — **how the code-switched Urdu transcribes**.
-That last one decides Phase 3.
+**What to report back:** whether the agents call the right tools unprompted, and whether
+barge-in feels instant.
 
 ## Phase 3 — Tuning 🟡 needs you, ~4 days
 
@@ -105,7 +104,7 @@ Voice work cannot be done by reading code; it needs someone listening.
   memory instead of calling a tool, and agents that talk too long. Both are prompt fixes.
 - **Turn detection.** If it cuts you off, or waits too long, tune `input.turn_detection`
   (`min_silence`, `interruption_delay`) in `agent_defs.py`.
-- **Keyterms.** Add every product name, node ID and Urdu term that transcribes wrong.
+- **Keyterms.** Add every product name, node ID and domain term that transcribes wrong.
   This is the cheapest accuracy win available and it is worth doing carefully.
 - **Voices.** The picker on the call page exists so you can A/B them live. Pick per agent.
 
@@ -127,14 +126,14 @@ The checklist from the rules, in the order I would do it:
 - [ ] **Public GitHub repo** — MIT licensed, as the rules require. Push this repo.
 - [ ] **Demo URL** — from Phase 4.
 - [ ] **Video presentation** — the one judges actually weigh. Script below.
-- [ ] **Slide deck** — problem, architecture, the Urdu decision, business value, roadmap.
+- [ ] **Slide deck** — problem, architecture, the language decision, business value, roadmap.
 - [ ] Title, short and long description, technology and category tags, cover image.
 
 ### Video script (aim for 3 minutes)
 
 1. **0:00** The problem, spoken over the landing page. A clinic with two phone lines. A
    fibre node dropping in Clifton and 1,840 households ringing at once.
-2. **0:30** Call Corvus. Say *"mera internet subah se band hai"* in Urdu. It identifies
+2. **0:30** Call Corvus. Say *"my internet has been down since this morning"*. It identifies
    you, and leads with the outage and the ETA before you have finished the sentence.
    **Cut to the Tool calls tab** — `lookup_account` and `check_node_status`, live, with
    real results. This single shot carries Application of Technology and Business Value.
@@ -142,32 +141,40 @@ The checklist from the rules, in the order I would do it:
 4. **1:35** Call Halden with `HG-3901` and let it *refuse* the password reset because no
    MFA is enrolled. A demo that shows the guardrail holding is worth more than three that
    show happy paths.
-5. **2:10** Buddy, in Roman Urdu, thirty seconds. Tonal contrast with the four desks.
-6. **2:35** The Urdu slide. Say plainly that Urdu is unsupported, that you routed it
-   through Hindi's acoustic model, and why that works. Judges reward this.
+5. **2:10** Buddy, thirty seconds. Tonal contrast with the four desks.
+6. **2:35** The language slide. Say plainly that you built the bilingual version, listened
+   to the output voice, and cut it. Shipping the honest cut is the stronger story.
+
+---
+
+## The language decision
+
+The build originally steered recognition with `["en","hi"]`, on the reasoning that spoken
+Urdu and Hindi share their phonology, so Hindi's acoustic model would capture Urdu-English
+code-switching. **Recognition worked. Text-to-speech did not.** The API's voices are trained
+on European-language phonology and rendered South Asian vocabulary in an accent awkward
+enough to cost more than the bilingual capability gained.
+
+It was cut after testing, and the agents now run `["en"]`. The landing page says so
+explicitly rather than quietly dropping it — "we built it, listened to it, and cut it" is a
+better answer to a judge than either a bad accent or silence.
+
+Reopen this when AssemblyAI ships Hindi voices; it is one field in `agent_defs.py`.
 
 ---
 
 ## Risks
 
-**1. Urdu transcription quality — the one that matters.**
-Urdu is not a supported input language; we steer with `["en","hi"]` on the reasoning that
-spoken Urdu and Hindi are the same language in the mouth. That reasoning is sound but it
-is **unproven until Phase 2**. If accuracy disappoints, in order of preference: add heavy
-`keyterms` for the vocabulary that misses; drop to `["en"]` and lean on the fact that
-Pakistani English is itself heavily code-switched; or, last resort, reposition the demo
-around English-first callers. Find out on day one, not in week four.
-
-**2. Being one of five hundred order-status bots.**
+**1. Being one of five hundred order-status bots.**
 Originality is a quarter of the score. The defensible ground is the *combination* — five
 agents in one product, tool calls visible to the person talking, a companion agent beside
 four commercial desks, and a language decision made honestly and explained. Lead with
 that, not with "we built a voice agent".
 
-**3. Credit burn.** Sessions bill on connection time, not speech. Hang up when you are not
+**2. Credit burn.** Sessions bill on connection time, not speech. Hang up when you are not
 testing.
 
-**4. Leaving the video to the last day.** It is a quarter of the score on its own and the
+**3. Leaving the video to the last day.** It is a quarter of the score on its own and the
 deadline is fixed at 8:00 PM PKT on 30 September. Shoot a rough cut in week two.
 
 ---
@@ -177,7 +184,7 @@ deadline is fixed at 8:00 PM PKT on 30 September. Shoot a rough cut in week two.
 | When | What | Whose |
 |---|---|---|
 | Now → 1 Sep | Key, register, Phase 2 end-to-end call | **You** |
-| Week of 1 Sep | Phase 3 tuning, report Urdu findings | **You** + me |
+| Week of 1 Sep | Phase 3 tuning, prompt and turn-detection passes | **You** + me |
 | Week of 8 Sep | Deploy, rough-cut the video | Both |
 | Week of 15 Sep | Second agent pass, slides | Both |
 | Week of 22 Sep | Final video, submission assets | **You** |

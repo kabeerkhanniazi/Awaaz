@@ -106,7 +106,7 @@ function landing() {
         h('h1', { class: 't-display' },
           'The phone line that ', h('span', { class: 't-gradient' }, 'never puts you on hold')),
         h('p', { class: 'hero-sub t-body-lg' },
-          'Five production-shaped voice agents you can call in the browser. Four run a real commercial desk. One just listens. All of them speak the way people in Pakistan actually speak, in the middle of the sentence they switch languages in.'),
+          'Five production-shaped voice agents you can call in the browser. Four run a real commercial desk and call live tools to do it. One just listens. Every one of them answers on the first ring.'),
         h('div', { class: 'hero-cta' },
           h('a', { class: 'btn btn-lg', href: '/agents', onclick: nav('/agents') }, 'Talk to an agent'),
           h('a', { class: 'btn btn-ghost btn-lg', href: '#how' }, 'How it works')),
@@ -144,7 +144,7 @@ function landing() {
 
         h('div', { class: 'pipeline' },
           [['01', 'Capture', 'An AudioWorklet resamples the microphone to 24 kHz PCM16 and streams it as base64 frames.'],
-           ['02', 'Understand', 'Universal-3.5 Pro transcribes across English and Hindustani, and decides when your turn ended.'],
+           ['02', 'Understand', 'Universal-3.5 Pro transcribes sub-second and decides when your turn ended, without tuning.'],
            ['03', 'Decide', 'The model answers under a per-agent system prompt, and calls a tool when it needs a real fact.'],
            ['04', 'Act', 'The tool call comes back to us over the same socket. We query the mock system and return a result.'],
            ['05', 'Speak', 'Audio streams back and plays through a ring buffer. Speak over it and it stops mid-word.']]
@@ -164,7 +164,7 @@ function landing() {
           [['Five agents', 'Four commercial desks with working tool calls, and one companion agent with none. Every system prompt is readable in the app before you dial.'],
            ['Real tool calling', `${CATALOG.agents.reduce((n, x) => n + x.tools.length, 0)} client-side function tools across the four commercial agents, backed by seeded mock systems: a clinic calendar, a distributor ledger, an ISP node map, a corporate directory.`],
            ['Live barge-in', 'Speak over the agent and playback stops mid-word, because the ring buffer is flushed the moment turn detection fires.'],
-           ['Code-switching', 'Input is steered to English and Hindi together, which is what captures the Urdu-English mix people actually use on the phone.'],
+           ['Guardrails that hold', 'The IT desk refuses a password reset when the employee has no MFA enrolled. The clinic will not give medical advice. Both refusals are demonstrable.'],
            ['Inspectable behaviour', 'Every tool call, its arguments and its raw result are shown live beside the transcript. Nothing about the agent is hidden from the person talking to it.']]
             .map(([t, d]) => h('div', { class: 'scope-row' }, h('dt', {}, t), h('dd', {}, d)))))),
 
@@ -173,13 +173,13 @@ function landing() {
       h('div', { class: 'wrap' },
         h('div', { class: 'section-head' },
           h('span', { class: 'eyebrow' }, 'One straight answer'),
-          h('h2', { class: 't-heading' }, 'About Urdu')),
+          h('h2', { class: 't-heading' }, 'Why English only')),
         h('div', { class: 'note', style: { maxWidth: '760px' } },
-          h('h4', {}, 'Urdu is not on the supported language list, and we did not pretend otherwise.'),
-          h('p', {}, 'The Voice Agent API transcribes eighteen languages. Urdu is not one of them, and there is no Urdu output voice. Building this on a claim that it was would have fallen apart the first time a judge spoke into it.'),
-          h('p', {}, 'What is supported is Hindi. Spoken conversational Urdu and Hindi are the same language in the mouth: they share their phonology and nearly all of their everyday vocabulary, and diverge in script and in formal register, neither of which survives a phone call. So input is steered to English and Hindi together, and the result is that "mujhe kal subah ki appointment chahiye" transcribes correctly. The agents reply in English, keeping the Urdu words a caller would use.'),
-          h('p', {}, 'AssemblyAI lists Hindi output voices as on the roadmap. On the day they ship, these agents become natively bilingual by changing one field.'),
-          h('p', {}, 'The product is named for the thing it could not quite have. Awaaz is Urdu for voice.')))),
+          h('h4', {}, 'We built the bilingual version first, listened to it, and cut it.'),
+          h('p', {}, 'An earlier build steered recognition through the Hindi acoustic model, on the reasoning that spoken Urdu and Hindi share their phonology. The recognition side held up well. The output voice did not.'),
+          h('p', {}, 'The Voice Agent API\u2019s voices are trained on European-language phonology. Handed South Asian vocabulary, they produce an accent awkward enough to undercut everything else on the call. An agent that mispronounces the caller\u2019s own words sounds materially worse than one that simply speaks good English, so the agents speak English.'),
+          h('p', {}, 'It costs less than it might appear. Pakistani commercial phone lines already run substantially in English: private clinics, B2B distribution, corporate IT desks. AssemblyAI lists Hindi voices as on the roadmap, and on the day they ship this is one field to change and a decision worth reopening.'),
+          h('p', {}, 'The name stayed. Awaaz is Urdu for voice.')))),
 
     h('section', { class: 'section', style: { paddingBottom: '0' } },
       h('div', { class: 'wrap', style: { textAlign: 'center' } },
