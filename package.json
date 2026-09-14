@@ -1,0 +1,13 @@
+{
+  "name": "awaaz-gateway-server",
+  "version": "1.0.0",
+  "description": "Awaaz Voice AI Gateway Server for Railway Deployment",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "ws": "^8.21.3"
+  }
+}

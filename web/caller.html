@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Voice AI - Call Kabeer</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@600;700&display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Inter', sans-serif;
+      background-color: #0D1117;
+      color: #F0F6FC;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      padding: 20px;
+    }
+    .card {
+      background: #161B22;
+      border: 1px solid #30363D;
+      border-radius: 24px;
+      padding: 36px;
+      width: 100%;
+      max-width: 440px;
+      box-shadow: 0 24px 48px rgba(0,0,0,0.6);
+      text-align: center;
+    }
+    .brand-icon {
+      width: 56px; height: 56px;
+      background: rgba(47, 128, 237, 0.2);
+      border-radius: 16px;
+      display: flex; align-items: center; justify-content: center;
+      color: #2F80ED; font-size: 28px;
+      margin: 0 auto 16px auto;
+    }
+    h1 { font-family: 'Outfit', sans-serif; font-size: 24px; color: #F0F6FC; }
+    .subtitle { font-size: 13px; color: #8B949E; margin-top: 4px; }
+    .btn-call {
+      width: 100%; margin-top: 24px;
+      background: #2F80ED; color: #FFF; border: none;
+      border-radius: 14px; padding: 16px;
+      font-size: 16px; font-weight: 700; cursor: pointer;
+      display: flex; align-items: center; justify-content: center; gap: 10px;
+      transition: background 0.2s, transform 0.1s;
+    }
+    .btn-call:hover { background: #256BC5; }
+    .btn-call:active { transform: scale(0.98); }
+    .btn-end {
+      width: 100%; margin-top: 12px;
+      background: #DA3633; color: #FFF; border: none;
+      border-radius: 14px; padding: 14px;
+      font-size: 14px; font-weight: 700; cursor: pointer;
+      transition: background 0.2s;
+      display: none;
+    }
+    .btn-end:hover { background: #B62324; }
+    .calling-ui { display: none; margin-top: 24px; }
+    .avatar {
+      width: 80px; height: 80px; border-radius: 50%;
+      background: #21262D; border: 2px solid #2F80ED;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 36px; margin: 0 auto 16px auto;
+      animation: pulse 1.5s infinite;
+    }
+    @keyframes pulse {
+      0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(47,128,237,0.4); }
+      70% { transform: scale(1.05); box-shadow: 0 0 0 20px rgba(47,128,237,0); }
+      100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(47,128,237,0); }
+    }
+    .call-status { font-size: 16px; font-weight: 700; color: #27AE60; margin-bottom: 6px; }
+    .call-subtitle { font-size: 13px; color: #8B949E; margin-bottom: 16px; }
+    .transcript {
+      text-align: left; max-height: 200px; overflow-y: auto;
+      background: #0D1117; border: 1px solid #30363D;
+      border-radius: 12px; padding: 12px;
+      font-size: 12px; line-height: 1.6;
+      color: #8B949E;
+    }
+    .transcript .you { color: #58A6FF; }
+    .transcript .agent { color: #3FB950; }
+    .status-dot {
+      display: inline-block; width: 8px; height: 8px;
+      border-radius: 50%; margin-right: 6px;
+    }
+    .status-dot.connected { background: #3FB950; }
+    .status-dot.connecting { background: #D29922; animation: blink 1s infinite; }
+    .status-dot.disconnected { background: #DA3633; }
+    @keyframes blink { 50% { opacity: 0.3; } }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="brand-icon">🎙️</div>
+    <h1>Voice AI</h1>
+    <p class="subtitle">Kabeer's AI Executive Secretary</p>
+
+    <!-- Initial: Just the call button -->
+    <div id="callSection">
+      <button class="btn-call" id="btnCall" onclick="startCall()">📞 Call Kabeer</button>
+    </div>
+
+    <!-- Active call UI -->
+    <div class="calling-ui" id="callingUI">
+      <div class="avatar" id="avatar">🤖</div>
+      <div class="call-status" id="callStatus">
+        <span class="status-dot connecting" id="statusDot"></span>
+        Connecting...
+      </div>
+      <div class="call-subtitle" id="callSubtitle">Setting up secure voice channel...</div>
+      <div class="transcript" id="transcript"></div>
+    </div>
+
+    <button class="btn-end" id="btnEnd" onclick="endCall()">📵 End Call</button>
+  </div>
+
+  <script>
+    // --- State ---
+    let aaiWs = null;       // WebSocket to AssemblyAI
+    let relayWs = null;     // WebSocket to our Node.js server (for mobile directives)
+    let audioCtx = null;
+    let stream = null;
+    let workletNode = null;
+    let ready = false;
+    let playbackTime = 0;
+    let currentCallId = null;  // Track callId for relay messages
+
+    // Send data to the phone via relay WebSocket
+    function relayToPhone(type, data) {
+      if (relayWs && relayWs.readyState === WebSocket.OPEN) {
+        relayWs.send(JSON.stringify({ type, data: { ...data, callId: currentCallId } }));
+      }
+    }
+
+    const SECRETARY_PROMPT = `You are Kabeer's AI Executive Secretary. Your role is to professionally screen and manage incoming calls.
+
+When someone calls:
+1. Greet them warmly and introduce yourself as Kabeer's AI secretary
+2. Ask for their name if they haven't provided it
+3. Ask about the purpose or nature of their call
+4. Let them know you're checking if Kabeer is available
+5. Engage in polite, professional conversation while waiting for Kabeer's response
+6. If Kabeer sends a directive, relay it naturally to the caller
+
+Behavior rules:
+- Be warm, professional, and human-like
+- Keep responses concise (1-2 sentences max)
+- Never reveal you are an AI unless directly asked
+- If caller is rude, remain calm and professional
+- Ask clarifying questions about their needs
+- Remember the caller's name and use it occasionally`;
+
+    const SECRETARY_GREETING = "Hello! You've reached Kabeer's line. I'm his secretary. May I know who's calling please?";
+
+    function addLog(text, cls) {
+      const el = document.getElementById('transcript');
+      const line = document.createElement('div');
+      line.className = cls || '';
+      line.textContent = text;
+      el.appendChild(line);
+      el.scrollTop = el.scrollHeight;
+    }
+
+    async function startCall() {
+      // Hide call button, show calling UI
+      document.getElementById('callSection').style.display = 'none';
+      document.getElementById('callingUI').style.display = 'block';
+      document.getElementById('btnEnd').style.display = 'block';
+
+      try {
+        // 1. Get token from our server
+        updateStatus('Fetching token...', 'connecting');
+        const tokenRes = await fetch('/api/voice-token');
+        if (!tokenRes.ok) throw new Error('Failed to get voice token: ' + await tokenRes.text());
+        const { token, agentId } = await tokenRes.json();
+
+        // 2. Setup audio context (default rate, resample in worklet)
+        audioCtx = new AudioContext();
+        await audioCtx.resume();
+        await audioCtx.audioWorklet.addModule('/pcm-processor.js');
+
+        // 3. Get microphone
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: true, noiseSuppression: false },
+        });
+        const source = audioCtx.createMediaStreamSource(stream);
+        workletNode = new AudioWorkletNode(audioCtx, 'pcm-processor', {
+          processorOptions: {
+            inputSampleRate: audioCtx.sampleRate,
+            targetSampleRate: 24000,
+          },
+        });
+
+        // 4. Connect to AssemblyAI Voice Agent
+        updateStatus('Connecting to AI Secretary...', 'connecting');
+        const wsUrl = new URL('wss://agents.assemblyai.com/v1/ws');
+        wsUrl.searchParams.set('token', token);
+        aaiWs = new WebSocket(wsUrl);
+
+        playbackTime = audioCtx.currentTime;
+
+        // Stream mic audio to AssemblyAI when ready
+        workletNode.port.onmessage = (e) => {
+          if (ready && aaiWs && aaiWs.readyState === WebSocket.OPEN) {
+            const b64 = btoa(String.fromCharCode(...new Uint8Array(e.data)));
+            aaiWs.send(JSON.stringify({ type: 'input.audio', audio: b64 }));
+          }
+        };
+        source.connect(workletNode).connect(audioCtx.destination);
+
+        aaiWs.addEventListener('open', () => {
+          updateStatus('Authenticating...', 'connecting');
+          // Always send explicit system_prompt, greeting, and voice to AssemblyAI
+          aaiWs.send(JSON.stringify({
+            type: 'session.update',
+            session: {
+              system_prompt: SECRETARY_PROMPT,
+              greeting: SECRETARY_GREETING,
+              voice: { voice_id: 'alba' },
+            },
+          }));
+        });
+
+        aaiWs.addEventListener('message', (event) => {
+          const msg = JSON.parse(event.data);
+
+          if (msg.type === 'session.ready') {
+            ready = true;
+            updateStatus('AI Secretary Connected', 'connected');
+            document.getElementById('callSubtitle').innerText = 'Speak naturally — the AI secretary is listening';
+          }
+          else if (msg.type === 'reply.audio') {
+            // Decode base64 PCM16 and schedule playback
+            const raw = atob(msg.data);
+            const pcm16 = new Int16Array(raw.length / 2);
+            for (let i = 0; i < pcm16.length; i++) {
+              pcm16[i] = raw.charCodeAt(i * 2) | (raw.charCodeAt(i * 2 + 1) << 8);
+            }
+            const float32 = new Float32Array(pcm16.length);
+            for (let i = 0; i < pcm16.length; i++) {
+              float32[i] = pcm16[i] / 32768;
+            }
+            const buffer = audioCtx.createBuffer(1, float32.length, 24000);
+            buffer.getChannelData(0).set(float32);
+            const src = audioCtx.createBufferSource();
+            src.buffer = buffer;
+            src.connect(audioCtx.destination);
+            const now = audioCtx.currentTime;
+            playbackTime = Math.max(playbackTime, now);
+            src.start(playbackTime);
+            playbackTime += buffer.duration;
+          }
+          else if (msg.type === 'reply.done' && msg.status === 'interrupted') {
+            playbackTime = audioCtx.currentTime;
+          }
+          else if (msg.type === 'transcript.user') {
+            addLog('You: ' + msg.text, 'you');
+            // Relay caller's speech to phone
+            relayToPhone('TRANSCRIPT_UPDATE', { speaker: 'caller', text: msg.text });
+          }
+          else if (msg.type === 'transcript.agent') {
+            addLog('Agent: ' + msg.text, 'agent');
+            // Relay agent's speech to phone
+            relayToPhone('TRANSCRIPT_UPDATE', { speaker: 'agent', text: msg.text });
+          }
+          else if (msg.type === 'session.error' || msg.type === 'error') {
+            addLog('Error: ' + (msg.message || JSON.stringify(msg)), '');
+            updateStatus('Error', 'disconnected');
+          }
+          else if (msg.type === 'session.ended') {
+            cleanup();
+          }
+        });
+
+        aaiWs.addEventListener('close', () => {
+          if (ready) {
+            updateStatus('Call Ended', 'disconnected');
+            ready = false;
+          }
+        });
+
+        aaiWs.addEventListener('error', () => {
+          addLog('Connection error. Check your API key and network.', '');
+          updateStatus('Connection Error', 'disconnected');
+        });
+
+        // 5. Connect to relay server FIRST (so it's ready before transcripts arrive)
+        const relayProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        relayWs = new WebSocket(`${relayProtocol}//${window.location.host}`);
+        relayWs.onopen = () => console.log('[Relay] Connected to gateway server');
+        relayWs.onmessage = (event) => {
+          try {
+            const msg = JSON.parse(event.data);
+            if (msg.type === 'DIRECTIVE_UPDATED') {
+              const { action, spokenDirective } = msg.data;
+              let promptToSpeak = '';
+
+              if (action === 'holding') {
+                addLog('⏳ Kabeer requested a 2-minute hold...', 'agent');
+                promptToSpeak = "Tell the caller warmly: 'Kabeer asked if you could please hold on the line for 2 minutes while he finishes up.'";
+              } else if (action === 'patchedToMaster') {
+                addLog('📞 Kabeer is joining the call...', 'agent');
+                promptToSpeak = "Tell the caller: 'Kabeer is joining our call right now.'";
+              } else if (action === 'declined') {
+                addLog('📵 Kabeer is unavailable right now.', 'agent');
+                promptToSpeak = "Tell the caller politely: 'Kabeer is unavailable at the moment, but I have noted your details and he will get back to you.' Then say goodbye.";
+              } else if (spokenDirective) {
+                addLog('💬 Kabeer directive: ' + spokenDirective, 'agent');
+                promptToSpeak = `Tell the caller this message from Kabeer: "${spokenDirective}"`;
+              }
+
+              // Send prompt injection to AssemblyAI Voice Agent so it SPEAKS it to the caller over audio!
+              if (promptToSpeak && aaiWs && aaiWs.readyState === WebSocket.OPEN) {
+                aaiWs.send(JSON.stringify({
+                  type: 'input.text',
+                  text: `[IMPORTANT DIRECTIVE FROM KABEER]: ${promptToSpeak}`
+                }));
+              }
+            }
+          } catch(e) {
+            console.error('[Relay] Message handling error:', e);
+          }
+        };
+
+        // 6. Notify mobile app via our server & store callId
+        try {
+          const callRes = await fetch('/api/call', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ callerName: 'Web Caller', topic: 'Voice Call' }),
+          });
+          const callData = await callRes.json();
+          currentCallId = callData.callId || null;
+          console.log('[Call] Registered with callId:', currentCallId);
+        } catch(e) {
+          console.warn('[Call] Failed to register call:', e);
+        }
+
+      } catch (err) {
+        addLog('Error: ' + err.message, '');
+        updateStatus('Failed to connect', 'disconnected');
+        console.error(err);
+      }
+    }
+
+    function endCall() {
+      if (aaiWs && aaiWs.readyState === WebSocket.OPEN) {
+        aaiWs.send(JSON.stringify({ type: 'session.end' }));
+      } else {
+        cleanup();
+      }
+    }
+
+    function cleanup() {
+      ready = false;
+      aaiWs?.close();
+      relayWs?.close();
+      stream?.getTracks().forEach(t => t.stop());
+      audioCtx?.close();
+      aaiWs = null;
+      relayWs = null;
+      audioCtx = null;
+      stream = null;
+      updateStatus('Call Ended', 'disconnected');
+      document.getElementById('callSubtitle').innerText = 'The call has ended.';
+      document.getElementById('avatar').style.animation = 'none';
+    }
+
+    function updateStatus(text, state) {
+      const dot = document.getElementById('statusDot');
+      dot.className = 'status-dot ' + state;
+      const statusEl = document.getElementById('callStatus');
+      statusEl.innerHTML = '';
+      statusEl.appendChild(dot);
+      statusEl.appendChild(document.createTextNode(' ' + text));
+    }
+
+    // Cleanup on tab close
+    window.addEventListener('pagehide', () => {
+      if (aaiWs && aaiWs.readyState === WebSocket.OPEN) {
+        aaiWs.send(JSON.stringify({ type: 'session.end' }));
+      }
+    });
+  </script>
+</body>
+</html>
