@@ -83,16 +83,7 @@
     }
     .call-status { font-size: 16px; font-weight: 700; color: #27AE60; margin-bottom: 6px; }
     .call-subtitle { font-size: 13px; color: #8B949E; margin-bottom: 16px; }
-    .transcript {
-      text-align: left; max-height: 220px; overflow-y: auto;
-      background: #0D1117; border: 1px solid #30363D;
-      border-radius: 12px; padding: 12px;
-      font-size: 12px; line-height: 1.6;
-      color: #8B949E;
-    }
-    .transcript .you { color: #58A6FF; }
-    .transcript .agent { color: #3FB950; }
-    .transcript .error { color: #F85149; font-weight: 600; }
+    .call-subtitle.error { color: #F85149; font-weight: 600; }
     .status-dot {
       display: inline-block; width: 8px; height: 8px;
       border-radius: 50%; margin-right: 6px;
@@ -128,7 +119,6 @@
         Connecting...
       </div>
       <div class="call-subtitle" id="callSubtitle">Setting up secure voice channel...</div>
-      <div class="transcript" id="transcript"></div>
     </div>
 
     <button class="btn-end" id="btnEnd" onclick="endCall()">📵 End Call</button>
@@ -177,13 +167,19 @@
       }
     });
 
+    // The page shows no transcript: details go to the browser console, and only
+    // errors reach the caller, in the subtitle (kept there when the call ends)
+    let lastError = null;
     function addLog(text, cls) {
-      const el = document.getElementById('transcript');
-      const line = document.createElement('div');
-      line.className = cls || '';
-      line.textContent = text;
-      el.appendChild(line);
-      el.scrollTop = el.scrollHeight;
+      if (cls === 'error') {
+        console.error('[Call]', text);
+        lastError = text;
+        const subtitle = document.getElementById('callSubtitle');
+        subtitle.innerText = text;
+        subtitle.classList.add('error');
+      } else {
+        console.log('[Call]', text);
+      }
     }
 
     function updateStatus(text, state) {
@@ -457,7 +453,8 @@
             // D1: Surface AssemblyAI error frames verbatim in UI
             const errDetails = [msg.code, msg.message, msg.param && `(field: ${msg.param})`]
               .filter(Boolean).join(' — ') || JSON.stringify(msg);
-            addLog('⚠️ AssemblyAI Error: ' + errDetails, 'error');
+            // Mid-call errors are usually recoverable: log them, don't alarm the caller
+            addLog('⚠️ AssemblyAI Error: ' + errDetails, ready ? '' : 'error');
             if (!ready) updateStatus('Error', 'disconnected');
           }
           else if (msg.type === 'session.ended') {
@@ -637,7 +634,7 @@
       audioCtx = null;
       stream = null;
       updateStatus(reason || 'Call Ended', 'disconnected');
-      document.getElementById('callSubtitle').innerText = 'The call has ended.';
+      if (!lastError) document.getElementById('callSubtitle').innerText = 'The call has ended.';
       document.getElementById('avatar').style.animation = 'none';
     }
 
