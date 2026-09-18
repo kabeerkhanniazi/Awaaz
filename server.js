@@ -646,6 +646,21 @@ wss.on('connection', (ws) => {
           break;
         }
 
+        case 'CALLER_CONTEXT': {
+          // Kabeer's phone recognised the caller in his contacts
+          if (role !== 'mobile') return;
+          const call = activeCalls.get(msg.callId);
+          if (!call) return;
+          const clean = (value, max) => String(value || '').replace(/[\x00-\x1F\x7F]+/g, ' ').trim().slice(0, max);
+          call.context = {
+            relationship: clean(msg.relationship, 40),
+            company: clean(msg.company, 80),
+            note: clean(msg.note, 200),
+          };
+          masterSessions.get(call.callId)?.onCallerContext();
+          break;
+        }
+
         case 'CALLER_DETAILS': {
           // The caller-facing secretary recorded who is calling and why
           if (role !== 'caller') return;

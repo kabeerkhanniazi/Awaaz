@@ -18,6 +18,8 @@ const URGENT_COOLDOWN_MS = 30 * 1000;
 // this long after "end" before acting, in case Kabeer is still talking
 const END_GRACE_MS = 2500;
 const TASK_DEDUPE_MS = 10 * 1000;
+// How long the first identity briefing waits for CALLER_CONTEXT from the phone
+const CONTEXT_WAIT_MS = 700;
 
 const BASE_PROMPT = `You are Kabeer's personal secretary. Right now you are talking privately with Kabeer himself, on his phone, about a caller you are screening on another line. The caller cannot hear this conversation.
 
@@ -117,13 +119,19 @@ function notesFrom(transcript) {
   return transcript.map(t => `${t.speaker}: ${t.text}`).join('\n');
 }
 
-function detailsFrom(details = {}) {
+function detailsFrom(details = {}, context = null) {
   const lines = [
     `Name: ${details.name || 'not given yet'}`,
     `Company: ${details.company || 'not given'}`,
     `Reason: ${details.reason || 'not given yet'}`,
     `Urgent: ${details.urgent ? 'yes' : 'not stated'}`,
   ];
+  if (context?.relationship) {
+    // From Kabeer's own contacts on his phone
+    lines.push(`In Kabeer's contacts as: ${context.relationship}`);
+    if (context.company) lines.push(`Contact's company: ${context.company}`);
+    if (context.note) lines.push(`Kabeer's note about them: ${context.note}`);
+  }
   return lines.join('\n');
 }
 
@@ -154,6 +162,7 @@ class MasterSession {
     this.pendingEnd = null;        // { command, timer } while waiting out END_GRACE_MS
     this.userTurnOpen = false;     // Kabeer spoke and the agent hasn't answered yet
     this.lastTaskAt = 0;
+    this.identityBriefingTimer = null; // first briefing, waiting briefly for CALLER_CONTEXT
 
     this.ws = new WebSocket('wss://agents.assemblyai.com/v1/ws', {
       headers: { Authorization: `Bearer ${apiKey}` },
@@ -342,10 +351,9 @@ class MasterSession {
     if (!this.identityBriefed && hasIdentity(details)) {
       this.identityBriefed = true;
       this.urgentBriefed = this.urgentBriefed || Boolean(details.urgent);
-      this._sendAgent({
-        type: 'reply.create',
-        instructions: `The secretary line has just confirmed:\n${detailsFrom(details)}\nIn one short sentence, tell Kabeer who is calling and why. Mention only what is confirmed above.`,
-      });
+      // Give the phone a moment to say whether this is someone in Kabeer's
+      // contacts (CALLER_CONTEXT) so the first briefing can mention it
+      this.identityBriefingTimer = setTimeout(() => this._briefIdentity(), CONTEXT_WAIT_MS);
     } else if (details.urgent && !this.urgentBriefed) {
       this.urgentBriefed = true;
       this.lastUrgentAt = Date.now();
@@ -354,6 +362,27 @@ class MasterSession {
         instructions: 'The caller says this is urgent. Tell Kabeer in one short sentence.',
       });
     }
+  }
+
+  /** Kabeer's phone matched the caller to one of his contacts. */
+  onCallerContext() {
+    if (!this.ready) return;
+    this._refreshPrompt();
+    // Still waiting to brief? Do it now, with the contact included
+    if (this.identityBriefingTimer) this._briefIdentity();
+  }
+
+  _briefIdentity() {
+    clearTimeout(this.identityBriefingTimer);
+    this.identityBriefingTimer = null;
+    if (this.ended) return;
+    const known = this.call.context?.relationship;
+    this._sendAgent({
+      type: 'reply.create',
+      instructions: `The secretary line has just confirmed:\n${detailsFrom(this.call.details, this.call.context)}\n` +
+        `In one short sentence, tell Kabeer who is calling and why${known ? ', mentioning how he knows them' : ''}. ` +
+        'Mention only what is confirmed above.',
+    });
   }
 
   stop() {
@@ -373,6 +402,8 @@ class MasterSession {
     this.ready = false;
     if (this.pendingEnd) clearTimeout(this.pendingEnd.timer);
     this.pendingEnd = null;
+    clearTimeout(this.identityBriefingTimer);
+    this.identityBriefingTimer = null;
     this._sendPhone({
       type: 'MASTER_SESSION_STATE',
       callId: this.call.callId,
