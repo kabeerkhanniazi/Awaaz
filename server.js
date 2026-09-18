@@ -247,7 +247,7 @@ const SECRETARY_TOOLS = [
         reason: { type: 'string', description: 'Why they are calling, in one short sentence, or empty.' },
         urgent: { type: 'boolean', description: 'True only if the caller said it is urgent or it is clearly an emergency.' },
         message: { type: 'string', description: 'A message the caller asked you to pass on to Kabeer, or empty.' },
-        callback: { type: 'string', description: 'How or when the caller wants to be called back (number, time), or empty.' },
+        callback: { type: 'string', description: 'How or when the caller wants to be called back (number, time), or empty. Write phone numbers in digits, e.g. 0300 1234567.' },
       },
       required: ['name', 'company', 'reason', 'urgent', 'message', 'callback'],
     },
@@ -263,6 +263,25 @@ const SECRETARY_TOOLS = [
 ];
 
 // Merges what the secretary recorded into the call; returns true if anything changed
+// The agent sometimes writes a phone number the way it says it ("zero three
+// zero zero ..."). Runs of three or more digit words become digits; anything
+// else ("call me tomorrow after five") is left alone.
+const DIGIT_WORDS = { zero: '0', oh: '0', o: '0', one: '1', two: '2', three: '3', four: '4', five: '5', six: '6', seven: '7', eight: '8', nine: '9' };
+function spokenDigits(text) {
+  const word = `(?:double |triple )?(?:${Object.keys(DIGIT_WORDS).join('|')})`;
+  const run = new RegExp(`\\b${word}(?:[ ,-]+${word}){2,}\\b`, 'gi');
+  return text.replace(run, (match) => {
+    let digits = '';
+    let repeat = 1;
+    for (const token of match.toLowerCase().split(/[ ,-]+/)) {
+      if (token === 'double') repeat = 2;
+      else if (token === 'triple') repeat = 3;
+      else { digits += DIGIT_WORDS[token].repeat(repeat); repeat = 1; }
+    }
+    return digits;
+  });
+}
+
 function mergeCallerDetails(call, raw) {
   const clean = (value, max) => String(value || '').replace(/[\x00-\x1F\x7F]+/g, ' ').trim().slice(0, max);
   const next = { ...call.details };
@@ -270,7 +289,7 @@ function mergeCallerDetails(call, raw) {
   const company = clean(raw.company, 80);
   const reason = clean(raw.reason, 200);
   const message = clean(raw.message, 500);
-  const callback = clean(raw.callback, 80);
+  const callback = spokenDigits(clean(raw.callback, 120)).slice(0, 80);
   if (name) next.name = name;
   if (company) next.company = company;
   if (reason) next.reason = reason;
@@ -902,4 +921,4 @@ server.listen(PORT, '0.0.0.0', () => {
   }
 });
 
-module.exports = { server, wss, SECRETARY_SYSTEM_PROMPT, SECRETARY_GREETING, SECRETARY_VOICE };
+module.exports = { server, wss, SECRETARY_SYSTEM_PROMPT, SECRETARY_GREETING, SECRETARY_VOICE, spokenDigits };

@@ -20,6 +20,9 @@ const END_GRACE_MS = 2500;
 const TASK_DEDUPE_MS = 10 * 1000;
 // How long the first identity briefing waits for CALLER_CONTEXT from the phone
 const CONTEXT_WAIT_MS = 700;
+// After tool results, how long to wait for the agent's follow-up reply before
+// sending a queued reply.create
+const QUEUED_REPLY_PAUSE_MS = 1500;
 
 const BASE_PROMPT = `You are Kabeer's personal secretary. Right now you are talking privately with Kabeer himself, on his phone, about a caller you are screening on another line. The caller cannot hear this conversation.
 
@@ -257,11 +260,22 @@ class MasterSession {
           // Kabeer talked over the secretary: drop what's still queued on the phone
           this._sendPhone({ type: 'MASTER_AUDIO_FLUSH', callId: this.call.callId });
         }
+        const sentResults = this.pendingResults.length > 0;
         this._flushToolResults();
         // An interrupted reply means Kabeer is talking again: wait for the next answer
         if (this.pendingEnd && msg.status !== 'interrupted' && !this.userTurnOpen) this._armEnd();
-        // A briefing held back while she was answering goes out now
-        if (this.queuedReplies.length) this._sendAgent(this.queuedReplies.shift());
+        // A briefing held back while she was answering goes out now, unless
+        // tool results just went out: she usually answers those first, which
+        // would swallow it. Then it waits for that answer (or a short pause).
+        if (this.queuedReplies.length) {
+          if (!sentResults) this._sendAgent(this.queuedReplies.shift());
+          else {
+            clearTimeout(this.queuedReplyTimer);
+            this.queuedReplyTimer = setTimeout(() => {
+              if (!this.replyActive && this.queuedReplies.length) this._sendAgent(this.queuedReplies.shift());
+            }, QUEUED_REPLY_PAUSE_MS);
+          }
+        }
         this._sendPhone({ type: 'MASTER_SESSION_STATE', callId: this.call.callId, state: 'listening' });
         break;
       case 'input.speech.started':
@@ -428,6 +442,8 @@ class MasterSession {
     this.pendingEnd = null;
     clearTimeout(this.identityBriefingTimer);
     this.identityBriefingTimer = null;
+    clearTimeout(this.queuedReplyTimer);
+    this.queuedReplies = [];
     this._sendPhone({
       type: 'MASTER_SESSION_STATE',
       callId: this.call.callId,

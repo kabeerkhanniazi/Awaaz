@@ -350,6 +350,18 @@
             if (msg.type === 'TAKE_MESSAGE') {
               // Nobody answered in time: the secretary offers to take a message
               if (!bridgeActive && !bridgePending) {
+                // Her standing instructions still say "checking whether Kabeer is
+                // available"; change them too, or she keeps saying that
+                if (aaiWs && aaiWs.readyState === WebSocket.OPEN) {
+                  aaiWs.send(JSON.stringify({
+                    type: 'session.update',
+                    session: {
+                      system_prompt: persona.systemPrompt +
+                        "\n\nUpdate: Kabeer is not available for this call. Stop saying you are checking. " +
+                        'Take a message (step 5), then say goodbye and call end_call.',
+                    },
+                  }));
+                }
                 sendDirective(
                   "Kabeer can't take the call right now. Tell the caller this politely and offer to take a message: " +
                   'ask what they would like him to know and how or when to call them back. Speak as his secretary.',
@@ -467,13 +479,23 @@
           }
           else if (msg.type === 'reply.done') {
             replyActive = false;
+            const sentResults = pendingToolResults.length > 0;
             flushToolResults();
             if (endWhenReplyDone) {
               endWhenReplyDone = false;
               endAfterPlayback();
             }
-            // A directive held back while she was answering goes out now
-            if (pendingDirective && pendingDirective.waitedForReply) dispatchDirective();
+            // A directive held back while she was answering goes out now. If
+            // tool results just went out she usually answers those first, which
+            // would swallow the directive: give her a moment to start, and if she
+            // does, the directive waits for that reply to finish too.
+            const held = pendingDirective;
+            if (held && held.waitedForReply) {
+              if (!sentResults) dispatchDirective();
+              else setTimeout(() => {
+                if (pendingDirective === held && held.waitedForReply && !replyActive) dispatchDirective();
+              }, 1500);
+            }
             // Caller barged in: silence audio already queued for the old reply
             if (msg.status === 'interrupted') stopPlayback();
           }
@@ -666,15 +688,19 @@
       if (!d || !aaiWs || aaiWs.readyState !== WebSocket.OPEN) return;
       // reply.create sent while the agent is still answering is silently
       // dropped: wait for that reply to finish (with a safety net)
-      if (replyActive && !d.waitedForReply) {
-        d.waitedForReply = true;
-        clearTimeout(d.timer);
-        d.timer = setTimeout(() => {
-          if (pendingDirective === d) dispatchDirective();
-        }, 15000);
+      if (replyActive && !d.forceSend) {
+        if (!d.waitedForReply) {
+          d.waitedForReply = true;
+          clearTimeout(d.timer);
+          // Safety net in case reply.done never comes
+          d.timer = setTimeout(() => {
+            if (pendingDirective === d) { d.forceSend = true; dispatchDirective(); }
+          }, 15000);
+        }
         return;
       }
       d.waitedForReply = false;
+      d.forceSend = false;
       d.attempts++;
       d.replyId = null;
       d.awaitingReply = true;
