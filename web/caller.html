@@ -159,6 +159,11 @@
     // Agent audio scheduled for playback, stopped when the caller barges in
     let scheduledSources = [];
 
+    // Patch In: after the secretary's hand-off line, the mic is streamed to the
+    // gateway (and on to Kabeer's phone) instead of AssemblyAI
+    let bridgePending = false;
+    let bridgeActive = false;
+
     // B6: Check Origin on Page Load
     window.addEventListener('DOMContentLoaded', () => {
       const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
@@ -269,6 +274,7 @@
         // Connect Gateway Relay WebSocket (C1: call routing)
         const relayProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         relayWs = new WebSocket(`${relayProtocol}//${window.location.host}`);
+        relayWs.binaryType = 'arraybuffer'; // Kabeer's voice arrives as raw PCM16 frames
         relayWs.onopen = () => {
           console.log('[Relay] Connected to gateway. Registering caller for', currentCallId);
           relayWs.send(JSON.stringify({
@@ -279,8 +285,17 @@
 
         // Handle incoming Master Directives from mobile app
         relayWs.onmessage = (event) => {
+          if (event.data instanceof ArrayBuffer) {
+            if (bridgeActive) schedulePcm16(new Uint8Array(event.data));
+            return;
+          }
           try {
             const msg = JSON.parse(event.data);
+            if (msg.type === 'BRIDGE_ENDED') {
+              addLog('Kabeer is no longer on the line.', 'error');
+              cleanup('Call Ended');
+              return;
+            }
             if (msg.type === 'DIRECTIVE_UPDATED') {
               const { action, spokenDirective, directiveVersion } = msg.data || msg;
 
@@ -291,6 +306,13 @@
                 return;
               }
               lastAppliedDirectiveVersion = ver;
+
+              if (action === 'hangup') {
+                addLog('Kabeer ended the call.', '');
+                cleanup('Call Ended');
+                return;
+              }
+              if (action === 'patchedToMaster') bridgePending = true;
 
               const instructions = buildDirectiveInstructions(action, spokenDirective);
               if (!instructions) return;
@@ -321,6 +343,10 @@
         playbackTime = audioCtx.currentTime;
 
         workletNode.port.onmessage = (e) => {
+          if (bridgeActive) {
+            if (relayWs && relayWs.readyState === WebSocket.OPEN) relayWs.send(e.data);
+            return;
+          }
           if (ready && aaiWs && aaiWs.readyState === WebSocket.OPEN) {
             const b64 = btoa(String.fromCharCode(...new Uint8Array(e.data)));
             aaiWs.send(JSON.stringify({ type: 'input.audio', audio: b64 }));
@@ -344,6 +370,8 @@
         });
 
         aaiWs.addEventListener('message', (event) => {
+          // After Patch In the secretary's session is retired; ignore its last events
+          if (event.target !== aaiWs) return;
           const msg = JSON.parse(event.data);
 
           if (msg.type === 'session.ready') {
@@ -383,27 +411,9 @@
           }
           else if (msg.type === 'reply.audio') {
             const raw = atob(msg.data);
-            const pcm16 = new Int16Array(raw.length / 2);
-            for (let i = 0; i < pcm16.length; i++) {
-              pcm16[i] = raw.charCodeAt(i * 2) | (raw.charCodeAt(i * 2 + 1) << 8);
-            }
-            const float32 = new Float32Array(pcm16.length);
-            for (let i = 0; i < pcm16.length; i++) {
-              float32[i] = pcm16[i] / 32768;
-            }
-            const buffer = audioCtx.createBuffer(1, float32.length, 24000);
-            buffer.getChannelData(0).set(float32);
-            const src = audioCtx.createBufferSource();
-            src.buffer = buffer;
-            src.connect(audioCtx.destination);
-            const now = audioCtx.currentTime;
-            playbackTime = Math.max(playbackTime, now);
-            src.start(playbackTime);
-            playbackTime += buffer.duration;
-            scheduledSources.push(src);
-            src.onended = () => {
-              scheduledSources = scheduledSources.filter(s => s !== src);
-            };
+            const bytes = new Uint8Array(raw.length);
+            for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+            schedulePcm16(bytes);
           }
           else if (msg.type === 'reply.done' && msg.status === 'interrupted') {
             // Caller barged in: silence audio already queued for the old reply
@@ -439,6 +449,7 @@
                 clearTimeout(d.timer);
                 pendingDirective = null;
                 reportDirective('DIRECTIVE_STATE', { state: 'spoken', version: d.version });
+                if (bridgePending) startBridge();
               }
             }
           }
@@ -508,6 +519,8 @@
     function sendDirective(instructions, version) {
       if (!aaiWs) {
         reportDirective('DIRECTIVE_FAILED', { reason: 'call_not_connected', version });
+        // No secretary to announce it, but Kabeer can still take the call
+        if (bridgePending) startBridge();
         return;
       }
       if (pendingDirective) clearTimeout(pendingDirective.timer);
@@ -542,6 +555,54 @@
       pendingDirective = null;
       console.error(`[Directive] Failed: ${reason}`);
       reportDirective('DIRECTIVE_FAILED', { reason, version: d.version });
+      // Kabeer is waiting to talk: connect even if the hand-off line wasn't spoken
+      if (bridgePending) startBridge();
+    }
+
+    // Plays little-endian PCM16 mono at 24 kHz (secretary replies and Kabeer's voice)
+    function schedulePcm16(bytes) {
+      if (!audioCtx || bytes.length < 2) return;
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.length - (bytes.length % 2));
+      const float32 = new Float32Array(view.byteLength / 2);
+      for (let i = 0; i < float32.length; i++) float32[i] = view.getInt16(i * 2, true) / 32768;
+      const buffer = audioCtx.createBuffer(1, float32.length, 24000);
+      buffer.getChannelData(0).set(float32);
+      const src = audioCtx.createBufferSource();
+      src.buffer = buffer;
+      src.connect(audioCtx.destination);
+      // Small lead so network jitter on the live bridge doesn't cause gaps
+      const now = audioCtx.currentTime;
+      if (playbackTime < now) playbackTime = now + (bridgeActive ? 0.08 : 0);
+      src.start(playbackTime);
+      playbackTime += buffer.duration;
+      scheduledSources.push(src);
+      src.onended = () => {
+        scheduledSources = scheduledSources.filter(s => s !== src);
+      };
+    }
+
+    // Hands the caller from the secretary to Kabeer once the hand-off line has
+    // finished playing: ends the AssemblyAI session and streams the mic to the gateway
+    function startBridge() {
+      if (!bridgePending || bridgeActive) return;
+      bridgePending = false;
+      const remaining = audioCtx ? Math.max(0, playbackTime - audioCtx.currentTime) : 0;
+      setTimeout(() => {
+        if (!relayWs) return; // call ended meanwhile
+        const oldAaiWs = aaiWs;
+        aaiWs = null; // the close handler must not treat this as the call ending
+        ready = false;
+        if (sessionTimer) clearTimeout(sessionTimer);
+        if (oldAaiWs && oldAaiWs.readyState === WebSocket.OPEN) {
+          oldAaiWs.send(JSON.stringify({ type: 'session.end' }));
+          setTimeout(() => oldAaiWs.close(), 1000);
+        }
+        bridgeActive = true;
+        relayWs.send(JSON.stringify({ type: 'BRIDGE_READY', callId: currentCallId }));
+        updateStatus('Connected to Kabeer', 'connected');
+        document.getElementById('callSubtitle').innerText = 'You are now speaking with Kabeer';
+        addLog('📞 Connected to Kabeer.', 'agent');
+      }, remaining * 1000 + 300);
     }
 
     function endCall() {
@@ -556,6 +617,8 @@
 
     function cleanup(reason) {
       ready = false;
+      bridgePending = false;
+      bridgeActive = false;
       if (pendingDirective) {
         clearTimeout(pendingDirective.timer);
         pendingDirective = null;

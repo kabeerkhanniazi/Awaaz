@@ -33,6 +33,33 @@ const callSockets = new Map();       // callId -> caller WebSocket
 const socketToCallId = new Map();    // WebSocket -> callId
 const socketRoles = new Map();       // WebSocket -> 'mobile' | 'caller'
 const rateLimits = new Map();        // client IP -> { windowStart, count }
+// Patch In: the phone that patched a call, and the reverse lookup. Once the
+// caller page reports BRIDGE_READY, binary PCM16 frames are relayed between them.
+const bridgeMobile = new Map();      // callId -> mobile WebSocket
+const mobileBridge = new Map();      // mobile WebSocket -> callId
+
+function endBridge(callId) {
+  const mobileWs = bridgeMobile.get(callId);
+  if (mobileWs) mobileBridge.delete(mobileWs);
+  bridgeMobile.delete(callId);
+}
+
+// Relays one binary audio frame to the other side of a live bridge
+function routeBridgeAudio(ws, frame) {
+  const role = socketRoles.get(ws);
+  let callId;
+  let target;
+  if (role === 'caller') {
+    callId = socketToCallId.get(ws);
+    target = bridgeMobile.get(callId);
+  } else if (role === 'mobile') {
+    callId = mobileBridge.get(ws);
+    target = callId && callSockets.get(callId);
+  }
+  const call = callId && activeCalls.get(callId);
+  if (!call || !call.bridged || !target || target.readyState !== WebSocket.OPEN) return;
+  target.send(frame, { binary: true });
+}
 
 function secretMatches(candidate) {
   if (!GATEWAY_AUTH_SECRET || typeof candidate !== 'string' || !candidate) return false;
@@ -331,7 +358,11 @@ const wss = new WebSocket.Server({ server, maxPayload: 64 * 1024 });
 wss.on('connection', (ws) => {
   console.log('[WebSocket] New client connected');
 
-  ws.on('message', (message) => {
+  ws.on('message', (message, isBinary) => {
+    if (isBinary) {
+      routeBridgeAudio(ws, message);
+      return;
+    }
     try {
       const msg = JSON.parse(message);
       const type = msg.type;
@@ -404,6 +435,13 @@ wss.on('connection', (ws) => {
           callSession.status = action;
           callSession.lastDirective = data;
 
+          if (action === 'patchedToMaster') {
+            // This phone owns the audio bridge once the caller page is ready
+            endBridge(callId);
+            bridgeMobile.set(callId, ws);
+            mobileBridge.set(ws, callId);
+          }
+
           // C1: Route ONLY to the caller socket owning this callId
           const callerWs = callSockets.get(callId);
           if (callerWs && callerWs.readyState === WebSocket.OPEN) {
@@ -458,6 +496,22 @@ wss.on('connection', (ws) => {
           break;
         }
 
+        case 'BRIDGE_READY': {
+          // The secretary has finished and the caller page now streams its mic here
+          if (role !== 'caller') return;
+          const callId = socketToCallId.get(ws);
+          const call = activeCalls.get(callId);
+          const mobileWs = bridgeMobile.get(callId);
+          if (!call || !mobileWs || mobileWs.readyState !== WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'BRIDGE_ENDED', reason: 'master_unavailable' }));
+            return;
+          }
+          call.bridged = true;
+          mobileWs.send(JSON.stringify({ type: 'BRIDGE_CONNECTED', callId }));
+          console.log(`[Bridge] ${callId} live between caller and phone`);
+          break;
+        }
+
         default:
           // D2: Log unrecognized WebSocket message types
           console.warn(`[WebSocket] Unrecognized message type: ${type}`);
@@ -473,11 +527,22 @@ wss.on('connection', (ws) => {
       mobileClients.delete(ws);
       console.log('[WebSocket] Mobile client disconnected');
     }
+    // The phone left mid-bridge: the caller would otherwise hear silence forever
+    const bridgedCallId = mobileBridge.get(ws);
+    if (bridgedCallId) {
+      const callerWs = callSockets.get(bridgedCallId);
+      const call = activeCalls.get(bridgedCallId);
+      if (call && call.bridged && callerWs && callerWs.readyState === WebSocket.OPEN) {
+        callerWs.send(JSON.stringify({ type: 'BRIDGE_ENDED', reason: 'master_disconnected' }));
+      }
+      endBridge(bridgedCallId);
+    }
     const callId = socketToCallId.get(ws);
     if (callId) {
       if (callSockets.get(callId) === ws) callSockets.delete(callId);
       socketToCallId.delete(ws);
       activeCalls.delete(callId);
+      endBridge(callId);
       console.log(`[WebSocket] Caller disconnected for ${callId}`);
       // Notify mobile client caller ended
       broadcastToMobile({

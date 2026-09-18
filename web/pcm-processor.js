@@ -12,7 +12,10 @@ class PCMProcessor extends AudioWorkletProcessor {
     // block's last sample.
     this.pos = 0;
     this.prev = 0;
-    this.chunk = new Int16Array(chunkSamples || 1200);
+    // Kept separately: once a chunk's buffer is transferred to the main thread
+    // the array is detached and its length reads as 0
+    this.chunkSize = chunkSamples || 1200;
+    this.chunk = new Int16Array(this.chunkSize);
     this.fill = 0;
   }
 
@@ -28,9 +31,9 @@ class PCMProcessor extends AudioWorkletProcessor {
       const sample = s0 + (s1 - s0) * (this.pos - i0);
       this.chunk[this.fill++] = Math.max(-32768, Math.min(32767, Math.round(sample * 32767)));
 
-      if (this.fill === this.chunk.length) {
+      if (this.fill === this.chunkSize) {
         this.port.postMessage(this.chunk.buffer, [this.chunk.buffer]);
-        this.chunk = new Int16Array(this.chunk.length);
+        this.chunk = new Int16Array(this.chunkSize);
         this.fill = 0;
       }
       this.pos += this.step;
