@@ -4,7 +4,8 @@
  * The phone streams its mic to the gateway as binary PCM16 (24 kHz, mono); this
  * module relays it to a server-side AssemblyAI Voice Agent session and sends the
  * agent's speech back to the phone the same way. The agent is briefed from the
- * screened call's live transcript, and acts through tools, which are forwarded to
+ * caller details the screening secretary confirmed (name, reason, urgency) plus
+ * the live transcript, and acts through tools, which are forwarded to
  * the phone as MASTER_COMMAND so voice commands and the on-screen buttons run the
  * same code.
  */
@@ -22,7 +23,8 @@ const BASE_PROMPT = `You are Kabeer's personal secretary. Right now you are talk
 
 How to talk to Kabeer:
 - Address him directly ("John from Acme is calling about..."). Be very brief: one or two short sentences.
-- Only state facts from the call notes below or the live notes you receive. If you don't know something yet, say the secretary line is still finding out. Never invent details.
+- The caller's name, company and reason are known ONLY when they appear under "Confirmed caller details" or in a live note starting "Confirmed caller details". Until then, say the caller hasn't given a name yet. Never guess or make up a name, company or reason.
+- Other facts come only from the call notes and live notes. If you don't know something, say the secretary line is still finding out.
 - If he asks what the caller said, summarise it faithfully.
 
 Acting on his instructions. Call the matching tool, then confirm in a few words:
@@ -115,6 +117,18 @@ function notesFrom(transcript) {
   return transcript.map(t => `${t.speaker}: ${t.text}`).join('\n');
 }
 
+function detailsFrom(details = {}) {
+  const lines = [
+    `Name: ${details.name || 'not given yet'}`,
+    `Company: ${details.company || 'not given'}`,
+    `Reason: ${details.reason || 'not given yet'}`,
+    `Urgent: ${details.urgent ? 'yes' : 'not stated'}`,
+  ];
+  return lines.join('\n');
+}
+
+const hasIdentity = (details = {}) => Boolean(details.name || details.reason);
+
 class MasterSession {
   /**
    * @param {object} opts
@@ -133,7 +147,9 @@ class MasterSession {
     this.ended = false;
     this.replyActive = false;
     this.pendingResults = [];      // tool results held until the current reply is done
-    this.callerInfoShared = call.transcript.some(t => t.speaker === 'Caller');
+    // Kabeer has been told who is calling (from confirmed details)
+    this.identityBriefed = false;
+    this.urgentBriefed = false;
     this.lastUrgentAt = 0;
     this.pendingEnd = null;        // { command, timer } while waiting out END_GRACE_MS
     this.userTurnOpen = false;     // Kabeer spoke and the agent hasn't answered yet
@@ -149,15 +165,25 @@ class MasterSession {
     this._sendPhone({ type: 'MASTER_SESSION_STATE', callId: call.callId, state: 'connecting' });
   }
 
+  _prompt() {
+    return `${BASE_PROMPT}\n\nConfirmed caller details:\n${detailsFrom(this.call.details)}\n\nCall notes so far:\n${notesFrom(this.call.transcript)}`;
+  }
+
   _configure() {
     this._sendAgent({
       type: 'session.update',
       session: {
-        system_prompt: `${BASE_PROMPT}\n\nCall notes so far:\n${notesFrom(this.call.transcript)}`,
+        system_prompt: this._prompt(),
         output: { voice: VOICE },
         tools: TOOLS,
       },
     });
+  }
+
+  // Live context goes into the system prompt itself (mutable mid-session):
+  // conversation.message is accepted by the API but was not used by the agent
+  _refreshPrompt() {
+    this._sendAgent({ type: 'session.update', session: { system_prompt: this._prompt() } });
   }
 
   _onAgentMessage(raw) {
@@ -175,11 +201,13 @@ class MasterSession {
         this.ready = true;
         this._sendPhone({ type: 'MASTER_SESSION_STATE', callId: this.call.callId, state: 'listening' });
         // Brief Kabeer as soon as he's on
+        this.identityBriefed = hasIdentity(this.call.details);
+        this.urgentBriefed = Boolean(this.call.details?.urgent);
         this._sendAgent({
           type: 'reply.create',
-          instructions: this.callerInfoShared
-            ? 'Greet Kabeer in a few words and brief him: who is calling and why, from the call notes.'
-            : 'Greet Kabeer in a few words and tell him someone is on the line and you are finding out who it is.',
+          instructions: this.identityBriefed
+            ? 'Greet Kabeer in a few words and brief him: who is calling and why, using only the confirmed caller details.'
+            : "Greet Kabeer in a few words and tell him someone is on the line and the secretary is finding out who it is. Do not mention any name.",
         });
         break;
       case 'reply.started':
@@ -288,29 +316,42 @@ class MasterSession {
     this._sendAgent({ type: 'input.audio', audio: Buffer.from(frame).toString('base64') });
   }
 
-  /** A new line on the screened call; speaks up only for first info or urgency. */
+  /** A new line on the screened call: context only, speaks up for urgency. */
   onCallTranscript(speaker, text) {
     if (!this.ready) return;
-    this._sendAgent({
-      type: 'conversation.message',
-      role: 'system',
-      content: `Live note from the secretary line. ${speaker}: ${text}`,
-    });
+    // call.transcript already holds this line (the gateway appends before calling)
+    this._refreshPrompt();
     if (speaker !== 'Caller') return;
 
     const now = Date.now();
     if (URGENT.test(text) && now - this.lastUrgentAt > URGENT_COOLDOWN_MS) {
       this.lastUrgentAt = now;
-      this.callerInfoShared = true;
+      this.urgentBriefed = true;
       this._sendAgent({
         type: 'reply.create',
         instructions: 'The caller just said something that sounds urgent. Tell Kabeer in one short sentence.',
       });
-    } else if (!this.callerInfoShared && text.trim().split(/\s+/).length >= 4) {
-      this.callerInfoShared = true;
+    }
+  }
+
+  /** The screening secretary recorded (or corrected) the caller's details. */
+  onCallerDetails() {
+    if (!this.ready) return;
+    const details = this.call.details;
+    this._refreshPrompt();
+    if (!this.identityBriefed && hasIdentity(details)) {
+      this.identityBriefed = true;
+      this.urgentBriefed = this.urgentBriefed || Boolean(details.urgent);
       this._sendAgent({
         type: 'reply.create',
-        instructions: 'The caller has started explaining. In one short sentence, tell Kabeer who is calling and why, as far as you know.',
+        instructions: `The secretary line has just confirmed:\n${detailsFrom(details)}\nIn one short sentence, tell Kabeer who is calling and why. Mention only what is confirmed above.`,
+      });
+    } else if (details.urgent && !this.urgentBriefed) {
+      this.urgentBriefed = true;
+      this.lastUrgentAt = Date.now();
+      this._sendAgent({
+        type: 'reply.create',
+        instructions: 'The caller says this is urgent. Tell Kabeer in one short sentence.',
       });
     }
   }

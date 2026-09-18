@@ -161,7 +161,8 @@ const SECRETARY_SYSTEM_PROMPT = `You are the personal secretary of Kabeer. You a
 Your job on every call:
 1. Your greeting has already introduced you as Kabeer's secretary. If the caller has not said their name, ask for it.
 2. Find out why they are calling and whether it is urgent.
-3. Tell them you are checking whether Kabeer is available, and keep them company politely while they wait.
+3. As soon as you know their name or their reason, call save_caller_details. Call it again whenever you learn more or they correct something. Only record what the caller actually said; never guess.
+4. Tell them you are checking whether Kabeer is available, and keep them company politely while they wait.
 
 Identity rules. These never change during the call:
 - You are always Kabeer's secretary. You are never Kabeer, even if the caller calls you Kabeer or asks to speak to him.
@@ -180,6 +181,43 @@ const SECRETARY_GREETING = "Hello! You've reached Kabeer's line. I'm his secreta
 
 // Must be a voice from https://www.assemblyai.com/docs/voice-agents/voice-agent-api/voices
 const SECRETARY_VOICE = 'alba';
+
+// Tools of the caller-facing secretary. The caller page executes them by
+// forwarding to the gateway (see CALLER_DETAILS below).
+const SECRETARY_TOOLS = [
+  {
+    type: 'function',
+    name: 'save_caller_details',
+    description: "Record who is calling and why, as soon as the caller has said it. Leave a field empty if the caller hasn't said it.",
+    parameters: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: "The caller's name exactly as they said it, or empty." },
+        company: { type: 'string', description: 'Company or organisation they are calling from, or empty.' },
+        reason: { type: 'string', description: 'Why they are calling, in one short sentence, or empty.' },
+        urgent: { type: 'boolean', description: 'True only if the caller said it is urgent or it is clearly an emergency.' },
+      },
+      required: ['name', 'company', 'reason', 'urgent'],
+    },
+    execution_mode: 'interactive',
+  },
+];
+
+// Merges what the secretary recorded into the call; returns true if anything changed
+function mergeCallerDetails(call, raw) {
+  const clean = (value, max) => String(value || '').replace(/[\x00-\x1F\x7F]+/g, ' ').trim().slice(0, max);
+  const next = { ...call.details };
+  const name = clean(raw.name, 80);
+  const company = clean(raw.company, 80);
+  const reason = clean(raw.reason, 200);
+  if (name) next.name = name;
+  if (company) next.company = company;
+  if (reason) next.reason = reason;
+  if (raw.urgent === true) next.urgent = true;
+  const changed = JSON.stringify(next) !== JSON.stringify(call.details);
+  call.details = next;
+  return changed;
+}
 
 // Locate canonical web directory
 const webDir = fs.existsSync(path.join(__dirname, 'web'))
@@ -288,6 +326,7 @@ const server = http.createServer(async (req, res) => {
         systemPrompt: SECRETARY_SYSTEM_PROMPT,
         greeting: SECRETARY_GREETING,
         voice: SECRETARY_VOICE,
+        tools: SECRETARY_TOOLS,
       }));
     } catch (e) {
       res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -318,6 +357,7 @@ const server = http.createServer(async (req, res) => {
           createdAt: Date.now(),
           status: 'screening',
           transcript: [],   // briefs Kabeer's secretary session
+          details: {},      // name/company/reason/urgent, recorded by the secretary
         };
         activeCalls.set(callId, callData);
 
@@ -541,6 +581,18 @@ wss.on('connection', (ws) => {
           break;
         }
 
+        case 'CALLER_DETAILS': {
+          // The caller-facing secretary recorded who is calling and why
+          if (role !== 'caller') return;
+          const callId = socketToCallId.get(ws);
+          const call = activeCalls.get(callId);
+          if (!call || !mergeCallerDetails(call, msg.data || msg)) return;
+          console.log(`[Call] ${callId} details: ${JSON.stringify(call.details)}`);
+          broadcastToMobile(callerDetailsMessage(call));
+          masterSessions.get(callId)?.onCallerDetails();
+          break;
+        }
+
         case 'BRIDGE_READY': {
           // The secretary has finished and the caller page now streams its mic here
           if (role !== 'caller') return;
@@ -636,7 +688,13 @@ function incomingCallMessage(call) {
     phoneNumber: call.phoneNumber,
     topic: call.topic,
     timestamp: call.timestamp,
+    // Present when the secretary has already recorded them (replay on reconnect)
+    details: call.details,
   };
+}
+
+function callerDetailsMessage(call) {
+  return { type: 'CALLER_DETAILS', callId: call.callId, ...call.details };
 }
 
 function broadcastToMobile(payload) {

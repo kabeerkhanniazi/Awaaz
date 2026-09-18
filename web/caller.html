@@ -156,6 +156,10 @@
     // Set when Kabeer ends the call: hang up after the secretary's goodbye
     let endAfterDirective = false;
 
+    // Tool results must wait until the reply that called the tool has finished
+    let replyActive = false;
+    let pendingToolResults = [];
+
     // B6: Check Origin on Page Load
     window.addEventListener('DOMContentLoaded', () => {
       const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
@@ -251,12 +255,12 @@
           throw new Error(`Gateway ${tokenRes.status}: ${detail}`);
         }
 
-        const { token, systemPrompt, greeting, voice } = await tokenRes.json();
+        const { token, systemPrompt, greeting, voice, tools } = await tokenRes.json();
         // Without a persona the agent would run as a generic assistant: refuse instead
         if (!token || !systemPrompt) {
           throw new Error('Gateway returned an incomplete voice session (missing token or persona).');
         }
-        persona = { systemPrompt, greeting, voice };
+        persona = { systemPrompt, greeting, voice, tools: tools || [] };
 
         // Register call with Gateway
         updateStatus('Registering call session...', 'connecting');
@@ -364,6 +368,7 @@
               system_prompt: persona.systemPrompt,
               greeting: persona.greeting,
               output: { voice: persona.voice },
+              tools: persona.tools,
             },
           }));
         });
@@ -396,7 +401,17 @@
           else if (msg.type === 'session.updated') {
             console.log('[AssemblyAI] session.updated', msg.config);
           }
+          else if (msg.type === 'tool.call') {
+            handleToolCall(msg.tool || msg);
+          }
+          else if (msg.type === 'reply.done') {
+            replyActive = false;
+            flushToolResults();
+            // Caller barged in: silence audio already queued for the old reply
+            if (msg.status === 'interrupted') stopPlayback();
+          }
           else if (msg.type === 'reply.started') {
+            replyActive = true;
             const d = pendingDirective;
             if (d && d.awaitingReply) {
               // First reply after reply.create is the directive being spoken
@@ -413,10 +428,6 @@
             const bytes = new Uint8Array(raw.length);
             for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
             schedulePcm16(bytes);
-          }
-          else if (msg.type === 'reply.done' && msg.status === 'interrupted') {
-            // Caller barged in: silence audio already queued for the old reply
-            stopPlayback();
           }
           else if (msg.type === 'transcript.user') {
             addLog('You: ' + msg.text, 'you');
@@ -509,6 +520,39 @@
       const clean = sanitizeDirective(spokenDirective);
       if (!clean) return '';
       return `Kabeer has sent you this message to pass on to the caller: "${clean}". Relay it to the caller now in your own words. If it is written from Kabeer's point of view (using "I" or "me"), convert it so you are talking about Kabeer.` + voiceRule;
+    }
+
+    // The secretary's tools run here: save_caller_details goes to the gateway,
+    // which updates Kabeer's phone and briefs his voice session
+    function handleToolCall(tool) {
+      let args = tool.arguments || {};
+      if (typeof args === 'string') {
+        try { args = JSON.parse(args); } catch (_) { args = {}; }
+      }
+      let ok = false;
+      if (tool.name === 'save_caller_details') {
+        console.log('[Call] caller details', args);
+        reportDirective('CALLER_DETAILS', {
+          name: args.name || '',
+          company: args.company || '',
+          reason: args.reason || '',
+          urgent: args.urgent === true,
+        });
+        ok = true;
+      }
+      pendingToolResults.push({
+        type: 'tool.result',
+        call_id: tool.call_id,
+        result: JSON.stringify(ok ? { saved: true } : { error: 'unknown tool' }),
+        is_error: !ok,
+      });
+      if (!replyActive) flushToolResults();
+    }
+
+    function flushToolResults() {
+      while (pendingToolResults.length && aaiWs && aaiWs.readyState === WebSocket.OPEN) {
+        aaiWs.send(JSON.stringify(pendingToolResults.shift()));
+      }
     }
 
     function reportDirective(type, fields) {
@@ -634,6 +678,8 @@
       bridgePending = false;
       bridgeActive = false;
       endAfterDirective = false;
+      replyActive = false;
+      pendingToolResults = [];
       if (pendingDirective) {
         clearTimeout(pendingDirective.timer);
         pendingDirective = null;
