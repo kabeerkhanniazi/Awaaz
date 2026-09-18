@@ -109,6 +109,9 @@ function startMasterSession(callId, phoneWs) {
     onCommand: (command) => {
       if (phoneWs.readyState === WebSocket.OPEN) phoneWs.send(JSON.stringify(command));
     },
+    otherCallers: () => [...activeCalls.values()]
+      .filter(c => c.callId !== callId && !c.bridged && callSockets.has(c.callId))
+      .map(c => c.details || {}),
     onEnded: () => {
       if (masterSessions.get(callId) === session) masterSessions.delete(callId);
       if (masterByMobile.get(phoneWs) === session) masterByMobile.delete(phoneWs);
@@ -117,6 +120,13 @@ function startMasterSession(callId, phoneWs) {
   masterSessions.set(callId, session);
   masterByMobile.set(phoneWs, session);
   console.log(`[Master] Voice session started for ${callId}`);
+}
+
+// Kabeer's secretary on one call knows who else is waiting
+function notifyOtherSessions(callId) {
+  for (const [id, session] of masterSessions) {
+    if (id !== callId) session.onOtherCallersChanged();
+  }
 }
 
 function endBridge(callId) {
@@ -638,6 +648,7 @@ wss.on('connection', (ws) => {
           socketRoles.set(ws, 'caller');
           console.log(`[WebSocket] Caller registered for callId: ${callId}`);
           scheduleTakeMessage(callId);
+          notifyOtherSessions(callId);
           ws.send(JSON.stringify({ type: 'CALLER_REGISTERED_SUCCESS', callId }));
           break;
         }
@@ -761,6 +772,7 @@ wss.on('connection', (ws) => {
           console.log(`[Call] ${callId} details: ${JSON.stringify(call.details)}`);
           broadcastToMobile(callerDetailsMessage(call));
           masterSessions.get(callId)?.onCallerDetails();
+          notifyOtherSessions(callId);
           break;
         }
 
@@ -797,6 +809,14 @@ wss.on('connection', (ws) => {
             return;
           }
           startMasterSession(callId, ws);
+          break;
+        }
+
+        case 'SYNC_MISSED_CALLS': {
+          // A caller the phone had waiting hung up: fetch what the secretary took down
+          if (role !== 'mobile') return;
+          const missed = missedCalls();
+          ws.send(JSON.stringify({ type: 'MISSED_CALLS', calls: missed.map(({ logged, ...c }) => c) }));
           break;
         }
 
@@ -854,6 +874,7 @@ wss.on('connection', (ws) => {
       endBridge(callId);
       stopMasterSession(callId);
       console.log(`[WebSocket] Caller disconnected for ${callId}`);
+      notifyOtherSessions(callId);
       // Notify mobile client caller ended
       broadcastToMobile({
         type: 'CALLER_HUNG_UP',

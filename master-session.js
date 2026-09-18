@@ -156,7 +156,18 @@ function detailsFrom(details = {}, context = null) {
   return lines.join('\n');
 }
 
-const hasIdentity = (details = {}) => Boolean(details.name || details.reason);
+// Callers on other lines, screened by the secretary while Kabeer is on this one
+function waitingFrom(others) {
+  if (!others.length) return '';
+  const lines = others.map((d) => {
+    const who = d.name || 'someone who has not given a name yet';
+    return `- ${who}${d.reason ? `, about: ${d.reason}` : ''}${d.urgent ? ' (urgent)' : ''}`;
+  });
+  return '\n\nOther callers waiting on another line (they come up on the phone once this call ends). ' +
+    `Mention them only if Kabeer asks who else is calling, or if one is urgent:\n${lines.join('\n')}`;
+}
+
+const hasIdentity =(details = {}) => Boolean(details.name || details.reason);
 
 class MasterSession {
   /**
@@ -167,8 +178,9 @@ class MasterSession {
    * @param {(cmd: object) => void} opts.onCommand forwards a MASTER_COMMAND to the phone
    * @param {() => void} opts.onEnded called once when the session is over
    */
-  constructor({ apiKey, call, phoneWs, onCommand, onEnded }) {
+  constructor({ apiKey, call, phoneWs, onCommand, onEnded, otherCallers = () => [] }) {
     this.call = call;
+    this.otherCallers = otherCallers;
     this.phoneWs = phoneWs;
     this.onCommand = onCommand;
     this.onEnded = onEnded;
@@ -198,7 +210,12 @@ class MasterSession {
   }
 
   _prompt() {
-    return `${BASE_PROMPT}\n\n${todayLine()}\n\nConfirmed caller details:\n${detailsFrom(this.call.details, this.call.context)}\n\nCall notes so far:\n${notesFrom(this.call.transcript)}`;
+    return `${BASE_PROMPT}\n\n${todayLine()}\n\nConfirmed caller details:\n${detailsFrom(this.call.details, this.call.context)}\n\nCall notes so far:\n${notesFrom(this.call.transcript)}${waitingFrom(this.otherCallers())}`;
+  }
+
+  /** Another caller rang or gave their details: keep the waiting list current. */
+  onOtherCallersChanged() {
+    if (this.ready) this._refreshPrompt();
   }
 
   _configure() {
