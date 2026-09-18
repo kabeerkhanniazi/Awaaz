@@ -153,6 +153,8 @@
     // gateway (and on to Kabeer's phone) instead of AssemblyAI
     let bridgePending = false;
     let bridgeActive = false;
+    // Set when Kabeer ends the call: hang up after the secretary's goodbye
+    let endAfterDirective = false;
 
     // B6: Check Origin on Page Load
     window.addEventListener('DOMContentLoaded', () => {
@@ -293,7 +295,7 @@
               return;
             }
             if (msg.type === 'DIRECTIVE_UPDATED') {
-              const { action, spokenDirective, directiveVersion } = msg.data || msg;
+              const { action, spokenDirective, directiveVersion, holdMinutes } = msg.data || msg;
 
               // B3: Monotonically increasing directive version check
               const ver = Number(directiveVersion) || 1;
@@ -309,8 +311,9 @@
                 return;
               }
               if (action === 'patchedToMaster') bridgePending = true;
+              if (action === 'declined') endAfterDirective = true;
 
-              const instructions = buildDirectiveInstructions(action, spokenDirective);
+              const instructions = buildDirectiveInstructions(action, spokenDirective, holdMinutes);
               if (!instructions) return;
               console.log(`[Directive] v${ver} ${action}: ${instructions}`);
               sendDirective(instructions, ver);
@@ -446,6 +449,7 @@
                 pendingDirective = null;
                 reportDirective('DIRECTIVE_STATE', { state: 'spoken', version: d.version });
                 if (bridgePending) startBridge();
+                if (endAfterDirective) endAfterPlayback();
               }
             }
           }
@@ -489,10 +493,12 @@
       if (audioCtx) playbackTime = audioCtx.currentTime;
     }
 
-    function buildDirectiveInstructions(action, spokenDirective) {
+    function buildDirectiveInstructions(action, spokenDirective, holdMinutes) {
       const voiceRule = " Speak as Kabeer's secretary and refer to Kabeer in the third person.";
       if (action === 'holding') {
-        return 'Kabeer has asked the caller to hold for about two minutes. Tell the caller this politely now.' + voiceRule;
+        const minutes = Number(holdMinutes) || 2;
+        const duration = minutes === 1 ? 'about a minute' : `about ${minutes} minutes`;
+        return `Kabeer has asked the caller to hold for ${duration}. Tell the caller this politely now.` + voiceRule;
       }
       if (action === 'patchedToMaster') {
         return 'Kabeer has decided to take this call. Tell the caller now that you are connecting them to Kabeer and ask them to stay on the line.' + voiceRule;
@@ -554,6 +560,17 @@
       reportDirective('DIRECTIVE_FAILED', { reason, version: d.version });
       // Kabeer is waiting to talk: connect even if the hand-off line wasn't spoken
       if (bridgePending) startBridge();
+      // Kabeer ended the call: end it even if the goodbye wasn't spoken
+      if (endAfterDirective) endAfterPlayback();
+    }
+
+    // Hangs up once the secretary's goodbye has finished playing
+    function endAfterPlayback() {
+      endAfterDirective = false;
+      const remaining = audioCtx ? Math.max(0, playbackTime - audioCtx.currentTime) : 0;
+      setTimeout(() => {
+        if (relayWs) cleanup('Call Ended');
+      }, remaining * 1000 + 500);
     }
 
     // Plays little-endian PCM16 mono at 24 kHz (secretary replies and Kabeer's voice)
@@ -616,6 +633,7 @@
       ready = false;
       bridgePending = false;
       bridgeActive = false;
+      endAfterDirective = false;
       if (pendingDirective) {
         clearTimeout(pendingDirective.timer);
         pendingDirective = null;

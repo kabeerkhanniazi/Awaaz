@@ -8,6 +8,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const WebSocket = require('ws');
+const { MasterSession } = require('./master-session');
 require('dotenv').config();
 
 const PORT = process.env.PORT || 3000;
@@ -37,6 +38,38 @@ const rateLimits = new Map();        // client IP -> { windowStart, count }
 // caller page reports BRIDGE_READY, binary PCM16 frames are relayed between them.
 const bridgeMobile = new Map();      // callId -> mobile WebSocket
 const mobileBridge = new Map();      // mobile WebSocket -> callId
+// Kabeer's private voice session with his secretary, one per call
+const masterSessions = new Map();    // callId -> MasterSession
+const masterByMobile = new Map();    // mobile WebSocket -> MasterSession
+const MAX_CALL_NOTES = 200;
+
+function stopMasterSession(callId) {
+  const session = masterSessions.get(callId);
+  if (session) session.stop();
+}
+
+function startMasterSession(callId, phoneWs) {
+  stopMasterSession(callId);
+  const previous = masterByMobile.get(phoneWs);
+  if (previous) previous.stop();
+
+  const call = activeCalls.get(callId);
+  const session = new MasterSession({
+    apiKey: ASSEMBLYAI_KEY,
+    call,
+    phoneWs,
+    onCommand: (command) => {
+      if (phoneWs.readyState === WebSocket.OPEN) phoneWs.send(JSON.stringify(command));
+    },
+    onEnded: () => {
+      if (masterSessions.get(callId) === session) masterSessions.delete(callId);
+      if (masterByMobile.get(phoneWs) === session) masterByMobile.delete(phoneWs);
+    },
+  });
+  masterSessions.set(callId, session);
+  masterByMobile.set(phoneWs, session);
+  console.log(`[Master] Voice session started for ${callId}`);
+}
 
 function endBridge(callId) {
   const mobileWs = bridgeMobile.get(callId);
@@ -54,7 +87,13 @@ function routeBridgeAudio(ws, frame) {
     target = bridgeMobile.get(callId);
   } else if (role === 'mobile') {
     callId = mobileBridge.get(ws);
-    target = callId && callSockets.get(callId);
+    const bridged = callId && activeCalls.get(callId)?.bridged;
+    if (!bridged) {
+      // Not talking to the caller yet: the phone's mic goes to Kabeer's secretary
+      masterByMobile.get(ws)?.audioFromPhone(frame);
+      return;
+    }
+    target = callSockets.get(callId);
   }
   const call = callId && activeCalls.get(callId);
   if (!call || !call.bridged || !target || target.readyState !== WebSocket.OPEN) return;
@@ -278,6 +317,7 @@ const server = http.createServer(async (req, res) => {
           timestamp: new Date().toISOString(),
           createdAt: Date.now(),
           status: 'screening',
+          transcript: [],   // briefs Kabeer's secretary session
         };
         activeCalls.set(callId, callData);
 
@@ -452,6 +492,9 @@ wss.on('connection', (ws) => {
                 action,
                 spokenDirective,
                 directiveVersion: directiveVersion || 1,
+                ...(action === 'holding' && data.holdMinutes
+                  ? { holdMinutes: Math.min(30, Math.max(1, Math.round(Number(data.holdMinutes) || 2))) }
+                  : {}),
               },
             }));
           } else {
@@ -483,13 +526,15 @@ wss.on('connection', (ws) => {
             broadcastToMobile({ type, callId, reason: String(payload.reason || 'unknown'), version: Number(payload.version) || 0 });
           } else if (type === 'TRANSCRIPT_UPDATE') {
             const speaker = payload.speaker === 'Secretary' ? 'Secretary' : 'Caller';
-            broadcastToMobile({
-              type,
-              callId,
-              speaker,
-              text: String(payload.text || '').slice(0, MAX_TRANSCRIPT_CHARS),
-              isFinal: payload.isFinal ?? true,
-            });
+            const text = String(payload.text || '').slice(0, MAX_TRANSCRIPT_CHARS);
+            broadcastToMobile({ type, callId, speaker, text, isFinal: payload.isFinal ?? true });
+            // Keep notes for Kabeer's secretary session, and brief it live
+            const call = activeCalls.get(callId);
+            if (call && text) {
+              call.transcript.push({ speaker, text });
+              if (call.transcript.length > MAX_CALL_NOTES) call.transcript.shift();
+              masterSessions.get(callId)?.onCallTranscript(speaker, text);
+            }
           } else {
             broadcastToMobile({ type, callId, reason: '10_minute_limit' });
           }
@@ -507,8 +552,35 @@ wss.on('connection', (ws) => {
             return;
           }
           call.bridged = true;
+          // Kabeer now talks to the caller directly; his secretary steps out
+          stopMasterSession(callId);
           mobileWs.send(JSON.stringify({ type: 'BRIDGE_CONNECTED', callId }));
           console.log(`[Bridge] ${callId} live between caller and phone`);
+          break;
+        }
+
+        case 'MASTER_SESSION_START': {
+          if (role !== 'mobile') return;
+          const callId = msg.callId;
+          const callerWs = callSockets.get(callId);
+          const call = activeCalls.get(callId);
+          if (!call || call.bridged || !callerWs || callerWs.readyState !== WebSocket.OPEN || !ASSEMBLYAI_KEY) {
+            ws.send(JSON.stringify({
+              type: 'MASTER_SESSION_STATE',
+              callId: callId || null,
+              state: 'error',
+              error: ASSEMBLYAI_KEY ? 'call_not_active' : 'assemblyai_key_missing',
+            }));
+            return;
+          }
+          startMasterSession(callId, ws);
+          break;
+        }
+
+        case 'MASTER_SESSION_STOP': {
+          if (role !== 'mobile') return;
+          const session = masterByMobile.get(ws);
+          if (session && (!msg.callId || session.call.callId === msg.callId)) session.stop();
           break;
         }
 
@@ -537,12 +609,14 @@ wss.on('connection', (ws) => {
       }
       endBridge(bridgedCallId);
     }
+    masterByMobile.get(ws)?.stop();
     const callId = socketToCallId.get(ws);
     if (callId) {
       if (callSockets.get(callId) === ws) callSockets.delete(callId);
       socketToCallId.delete(ws);
       activeCalls.delete(callId);
       endBridge(callId);
+      stopMasterSession(callId);
       console.log(`[WebSocket] Caller disconnected for ${callId}`);
       // Notify mobile client caller ended
       broadcastToMobile({
