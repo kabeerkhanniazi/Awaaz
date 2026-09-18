@@ -3,126 +3,125 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Voice AI - Call Kabeer</title>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@600;700&display=swap" rel="stylesheet">
+  <meta name="color-scheme" content="light dark">
+  <title>Call Kabeer</title>
   <style>
+    :root {
+      --bg: #F7F7F5; --surface: #FFFFFF; --text: #1C1C1A; --muted: #6B6B66; --line: #E2E2DE;
+      --accent: #1F6F5C; --on-accent: #FFFFFF; --danger: #B3402A; --warn: #9A6200;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #121212; --surface: #191919; --text: #EDEDEB; --muted: #9D9D98; --line: #2E2E2E;
+        --accent: #5BB79E; --on-accent: #0B1F1A; --danger: #E0735E; --warn: #E0A84A;
+      }
+    }
     * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; }
     body {
-      font-family: 'Inter', sans-serif;
-      background-color: #0D1117;
-      color: #F0F6FC;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
       display: flex;
-      justify-content: center;
       align-items: center;
-      min-height: 100vh;
-      padding: 20px;
+      justify-content: center;
+      padding: 24px 16px;
+      -webkit-font-smoothing: antialiased;
     }
-    .card {
-      background: #161B22;
-      border: 1px solid #30363D;
-      border-radius: 24px;
-      padding: 36px;
-      width: 100%;
-      max-width: 460px;
-      box-shadow: 0 24px 48px rgba(0,0,0,0.6);
-      text-align: center;
-    }
-    .brand-icon {
-      width: 56px; height: 56px;
-      background: rgba(47, 128, 237, 0.2);
-      border-radius: 16px;
-      display: flex; align-items: center; justify-content: center;
-      color: #2F80ED; font-size: 28px;
-      margin: 0 auto 16px auto;
-    }
-    h1 { font-family: 'Outfit', sans-serif; font-size: 24px; color: #F0F6FC; }
-    .subtitle { font-size: 13px; color: #8B949E; margin-top: 4px; }
-    .warning-banner {
-      display: none;
-      background: rgba(218, 54, 51, 0.15);
-      border: 1px solid #DA3633;
-      border-radius: 12px;
-      padding: 12px;
-      margin-top: 16px;
-      font-size: 12px;
-      color: #F85149;
-      text-align: left;
-      line-height: 1.4;
-    }
-    .btn-call {
-      width: 100%; margin-top: 24px;
-      background: #2F80ED; color: #FFF; border: none;
-      border-radius: 14px; padding: 16px;
-      font-size: 16px; font-weight: 700; cursor: pointer;
-      display: flex; align-items: center; justify-content: center; gap: 10px;
-      transition: background 0.2s, transform 0.1s;
-    }
-    .btn-call:hover { background: #256BC5; }
-    .btn-call:active { transform: scale(0.98); }
-    .btn-end {
-      width: 100%; margin-top: 12px;
-      background: #DA3633; color: #FFF; border: none;
-      border-radius: 14px; padding: 14px;
-      font-size: 14px; font-weight: 700; cursor: pointer;
-      transition: background 0.2s;
-      display: none;
-    }
-    .btn-end:hover { background: #B62324; }
-    .calling-ui { display: none; margin-top: 24px; }
+    main { width: 100%; max-width: 360px; text-align: center; }
     .avatar {
-      width: 80px; height: 80px; border-radius: 50%;
-      background: #21262D; border: 2px solid #2F80ED;
+      position: relative;
+      width: 88px; height: 88px; margin: 0 auto 20px;
+      border-radius: 50%;
+      background: var(--surface);
+      border: 1px solid var(--line);
       display: flex; align-items: center; justify-content: center;
-      font-size: 36px; margin: 0 auto 16px auto;
-      animation: pulse 1.5s infinite;
+      font-size: 34px; font-weight: 600;
     }
-    @keyframes pulse {
-      0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(47,128,237,0.4); }
-      70% { transform: scale(1.05); box-shadow: 0 0 0 20px rgba(47,128,237,0); }
-      100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(47,128,237,0); }
+    /* A single soft ring while the call is being set up */
+    .avatar.ringing::after {
+      content: ''; position: absolute; inset: -6px; border-radius: 50%;
+      border: 2px solid var(--accent); opacity: 0;
+      animation: ring 1.6s ease-out infinite;
     }
-    .call-status { font-size: 16px; font-weight: 700; color: #27AE60; margin-bottom: 6px; }
-    .call-subtitle { font-size: 13px; color: #8B949E; margin-bottom: 16px; }
-    .call-subtitle.error { color: #F85149; font-weight: 600; }
-    .status-dot {
-      display: inline-block; width: 8px; height: 8px;
-      border-radius: 50%; margin-right: 6px;
+    @keyframes ring { 0% { transform: scale(.92); opacity: .6; } 100% { transform: scale(1.18); opacity: 0; } }
+    h1 { font-size: 26px; font-weight: 600; letter-spacing: -0.01em; }
+    .lead { margin-top: 6px; color: var(--muted); font-size: 15px; line-height: 1.45; }
+    .notice {
+      display: none; margin-top: 20px; padding: 12px 14px;
+      border-radius: 10px; border: 1px solid var(--line); background: var(--surface);
+      color: var(--danger); font-size: 14px; line-height: 1.4; text-align: left;
     }
-    .status-dot.connected { background: #3FB950; }
-    .status-dot.connecting { background: #D29922; animation: blink 1s infinite; }
-    .status-dot.disconnected { background: #DA3633; }
-    @keyframes blink { 50% { opacity: 0.3; } }
+    .status {
+      margin-top: 28px; min-height: 22px;
+      display: flex; align-items: center; justify-content: center; gap: 8px;
+      font-size: 16px; font-weight: 500;
+    }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--line); }
+    .status-dot.connected { background: var(--accent); }
+    .status-dot.connecting { background: var(--warn); animation: blink 1.2s infinite; }
+    .status-dot.disconnected { background: var(--danger); }
+    @keyframes blink { 50% { opacity: .35; } }
+    .call-subtitle { margin-top: 6px; min-height: 20px; color: var(--muted); font-size: 14px; line-height: 1.4; }
+    .call-subtitle.error { color: var(--danger); }
+    .timer { margin-top: 4px; min-height: 18px; color: var(--muted); font-size: 14px; font-variant-numeric: tabular-nums; }
+    .controls { margin-top: 36px; display: flex; justify-content: center; gap: 32px; }
+    .control { display: flex; flex-direction: column; align-items: center; }
+    .round {
+      width: 68px; height: 68px; border-radius: 50%; border: none; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      transition: transform .1s, opacity .2s;
+    }
+    .round:active { transform: scale(.95); }
+    .round:disabled { opacity: .4; cursor: not-allowed; }
+    .round svg { width: 28px; height: 28px; fill: currentColor; }
+    .call { background: var(--accent); color: var(--on-accent); }
+    .end { background: var(--danger); color: #FFFFFF; }
+    .mute { background: var(--surface); color: var(--text); border: 1px solid var(--line); }
+    .mute[aria-pressed="true"] { background: var(--text); color: var(--bg); }
+    .label { margin-top: 8px; font-size: 13px; color: var(--muted); }
+    .hidden { display: none !important; }
+    footer { margin-top: 40px; font-size: 12px; color: var(--muted); line-height: 1.5; }
   </style>
 </head>
 <body>
-  <div class="card">
-    <div class="brand-icon">🎙️</div>
-    <h1>Voice AI</h1>
-    <p class="subtitle">Kabeer's AI Executive Secretary</p>
+  <main>
+    <div class="avatar" id="avatar">K</div>
+    <h1>Kabeer</h1>
+    <p class="lead">My assistant answers first and lets me know you're calling.</p>
 
-    <!-- B6: Secure Origin Warning -->
-    <div class="warning-banner" id="insecureWarning">
-      ⚠️ <strong>Insecure Origin Detected:</strong> Microphone capture is prohibited by browsers over unencrypted HTTP.
-      Please open this page over <strong>HTTPS</strong> or via <strong>localhost</strong>.
+    <!-- Browsers only allow the microphone on https or localhost -->
+    <div class="notice" id="insecureWarning">This page needs a secure (https) connection to use your microphone.</div>
+
+    <div id="callingUI" class="hidden">
+      <div class="status" id="callStatus"><span class="status-dot connecting" id="statusDot"></span> Calling...</div>
+      <div class="call-subtitle" id="callSubtitle"></div>
+      <div class="timer" id="callTimer"></div>
     </div>
 
-    <!-- Initial: Call button -->
-    <div id="callSection">
-      <button class="btn-call" id="btnCall" onclick="startCall()">📞 Call Kabeer</button>
-    </div>
-
-    <!-- Active call UI -->
-    <div class="calling-ui" id="callingUI">
-      <div class="avatar" id="avatar">🤖</div>
-      <div class="call-status" id="callStatus">
-        <span class="status-dot connecting" id="statusDot"></span>
-        Connecting...
+    <div class="controls">
+      <div class="control" id="callSection">
+        <button class="round call" id="btnCall" onclick="startCall()" aria-label="Call Kabeer">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.01 15.38c-1.23 0-2.42-.2-3.53-.56a.977.977 0 0 0-1.01.24l-1.57 1.97c-2.83-1.35-5.48-3.9-6.89-6.83l1.95-1.66c.27-.28.35-.67.24-1.02-.37-1.11-.56-2.3-.56-3.53 0-.54-.45-.99-.99-.99H4.19C3.65 3 3 3.24 3 3.99 3 13.28 10.73 21 20.01 21c.71 0 .99-.63.99-1.18v-3.45c0-.54-.45-.99-.99-.99z"/></svg>
+        </button>
+        <div class="label" id="callLabel">Call</div>
       </div>
-      <div class="call-subtitle" id="callSubtitle">Setting up secure voice channel...</div>
+      <div class="control hidden" id="muteControl">
+        <button class="round mute" id="btnMute" onclick="toggleMute()" aria-pressed="false" aria-label="Mute">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.48 6-3.3 6-6.72h-1.7z"/></svg>
+        </button>
+        <div class="label" id="muteLabel">Mute</div>
+      </div>
+      <div class="control hidden" id="endControl">
+        <button class="round end" id="btnEnd" onclick="endCall()" aria-label="End call">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 9c-1.6 0-3.15.25-4.6.72v3.1c0 .39-.23.74-.56.9-.98.49-1.87 1.12-2.66 1.85-.18.18-.43.28-.7.28-.28 0-.53-.11-.71-.29L.29 13.08a.956.956 0 0 1-.29-.7c0-.28.11-.53.29-.71C3.34 8.78 7.46 7 12 7s8.66 1.78 11.71 4.67c.18.18.29.43.29.71 0 .28-.11.53-.29.71l-2.48 2.48c-.18.18-.43.29-.71.29-.27 0-.52-.11-.7-.28a11.27 11.27 0 0 0-2.67-1.85.996.996 0 0 1-.56-.9v-3.1C15.15 9.25 13.6 9 12 9z"/></svg>
+        </button>
+        <div class="label">End</div>
+      </div>
     </div>
 
-    <button class="btn-end" id="btnEnd" onclick="endCall()">📵 End Call</button>
-  </div>
+    <footer>Uses your microphone during the call. The call may be transcribed so Kabeer can follow up.</footer>
+  </main>
 
   <script>
     // --- State ---
@@ -195,6 +194,43 @@
       statusEl.innerHTML = '';
       statusEl.appendChild(dot);
       statusEl.appendChild(document.createTextNode(' ' + text));
+      if (state === 'connected') startTimer();
+      if (state !== 'connecting') document.getElementById('avatar').classList.remove('ringing');
+    }
+
+    function setSubtitle(text) {
+      if (lastError) return; // keep an error visible
+      document.getElementById('callSubtitle').innerText = text;
+    }
+
+    // Call timer, from the moment the call connects
+    let timerStart = null;
+    let timerInterval = null;
+    function startTimer() {
+      if (timerStart) return;
+      timerStart = Date.now();
+      const el = document.getElementById('callTimer');
+      const tick = () => {
+        const s = Math.floor((Date.now() - timerStart) / 1000);
+        el.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+      };
+      tick();
+      timerInterval = setInterval(tick, 1000);
+    }
+    function stopTimer() {
+      clearInterval(timerInterval);
+      timerInterval = null;
+      timerStart = null;
+    }
+
+    // Caller-side mute: mic audio simply isn't sent while muted
+    let micMuted = false;
+    function toggleMute() {
+      micMuted = !micMuted;
+      const button = document.getElementById('btnMute');
+      button.setAttribute('aria-pressed', String(micMuted));
+      button.setAttribute('aria-label', micMuted ? 'Unmute' : 'Mute');
+      document.getElementById('muteLabel').textContent = micMuted ? 'Unmute' : 'Mute';
     }
 
     // B4: Directive Sanitization
@@ -211,10 +247,18 @@
 
     // B5: Correct Audio Gesture Ordering
     async function startCall() {
-      // Hide call button, show calling UI
-      document.getElementById('callSection').style.display = 'none';
-      document.getElementById('callingUI').style.display = 'block';
-      document.getElementById('btnEnd').style.display = 'block';
+      // Swap the call button for the in-call controls
+      lastError = null;
+      const subtitle = document.getElementById('callSubtitle');
+      subtitle.classList.remove('error');
+      subtitle.innerText = '';
+      document.getElementById('callTimer').textContent = '';
+      document.getElementById('callSection').classList.add('hidden');
+      document.getElementById('callingUI').classList.remove('hidden');
+      document.getElementById('muteControl').classList.remove('hidden');
+      document.getElementById('endControl').classList.remove('hidden');
+      document.getElementById('avatar').classList.add('ringing');
+      if (micMuted) toggleMute();
 
       try {
         // Step 1: Construct AudioContext synchronously (first statement, NO await before it)
@@ -225,20 +269,20 @@
         const resumePromise = audioCtx.resume();
 
         // Step 3: Await getUserMedia with differentiated errors
-        updateStatus('Requesting mic access...', 'connecting');
+        updateStatus('Allow microphone access', 'connecting');
         try {
           stream = await navigator.mediaDevices.getUserMedia({
             audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
           });
         } catch (micErr) {
           if (micErr.name === 'NotAllowedError') {
-            throw new Error('Microphone permission was denied by user or browser policy.');
+            throw new Error('Microphone access is blocked. Allow it in your browser, then call again.');
           } else if (micErr.name === 'NotFoundError' || micErr.name === 'DevicesNotFoundError') {
-            throw new Error('No microphone device was detected on your system.');
+            throw new Error('No microphone was found on this device.');
           } else if (micErr.name === 'SecurityError') {
-            throw new Error('Insecure origin: Microphone capture is blocked on unencrypted HTTP.');
+            throw new Error('This page needs a secure (https) connection to use your microphone.');
           } else {
-            throw new Error('Microphone access failed: ' + micErr.message);
+            throw new Error('Your microphone could not be started.');
           }
         }
 
@@ -247,7 +291,7 @@
         await audioCtx.audioWorklet.addModule('/pcm-processor.js');
 
         // Step 5: Network calls are now safe (user gesture context already claimed)
-        updateStatus('Fetching token & persona...', 'connecting');
+        updateStatus('Calling...', 'connecting');
         const tokenRes = await fetch('/api/voice-token');
         if (!tokenRes.ok) {
           let detail = await tokenRes.text();
@@ -263,7 +307,7 @@
         persona = { systemPrompt, greeting, voice, tools: tools || [] };
 
         // Register call with Gateway
-        updateStatus('Registering call session...', 'connecting');
+        updateStatus('Calling...', 'connecting');
         const callRes = await fetch('/api/call', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -338,7 +382,7 @@
         });
 
         // Connect to AssemblyAI Voice Agent
-        updateStatus('Connecting to AI Secretary...', 'connecting');
+        updateStatus('Calling...', 'connecting');
         const wsUrl = new URL('wss://agents.assemblyai.com/v1/ws');
         wsUrl.searchParams.set('token', token);
         aaiWs = new WebSocket(wsUrl);
@@ -346,6 +390,7 @@
         playbackTime = audioCtx.currentTime;
 
         workletNode.port.onmessage = (e) => {
+          if (micMuted) return;
           if (bridgeActive) {
             if (relayWs && relayWs.readyState === WebSocket.OPEN) relayWs.send(e.data);
             return;
@@ -358,7 +403,7 @@
         source.connect(workletNode).connect(audioCtx.destination);
 
         aaiWs.addEventListener('open', () => {
-          updateStatus('Setting up secretary...', 'connecting');
+          updateStatus('Calling...', 'connecting');
           // Must be the first message: AssemblyAI configures the agent from it
           // and only then replies with session.ready. Greeting and voice cannot
           // be changed after this point.
@@ -381,8 +426,8 @@
           if (msg.type === 'session.ready') {
             ready = true;
             console.log('[AssemblyAI] session.ready', msg.session_id, msg.config);
-            updateStatus('AI Secretary Connected', 'connected');
-            document.getElementById('callSubtitle').innerText = 'Speak naturally — the executive secretary is screening';
+            updateStatus('Connected', 'connected');
+            setSubtitle("You're speaking with Kabeer's assistant.");
 
             // A directive that arrived before the session was ready
             if (pendingDirective && pendingDirective.attempts === 0) dispatchDirective();
@@ -391,7 +436,7 @@
             if (sessionTimer) clearTimeout(sessionTimer);
             sessionTimer = setTimeout(() => {
               addLog('⏱️ Session ended — 10 minute limit reached.', 'error');
-              updateStatus('Session Ended (10m limit)', 'disconnected');
+              updateStatus('Call ended', 'disconnected');
               if (relayWs && relayWs.readyState === WebSocket.OPEN) {
                 relayWs.send(JSON.stringify({ type: 'SESSION_EXPIRED', callId: currentCallId }));
               }
@@ -490,7 +535,7 @@
         });
 
       } catch (err) {
-        addLog('Error: ' + err.message, 'error');
+        addLog(err.message, 'error');
         console.error(err);
         cleanup('Failed to connect');
       }
@@ -658,7 +703,7 @@
         bridgeActive = true;
         relayWs.send(JSON.stringify({ type: 'BRIDGE_READY', callId: currentCallId }));
         updateStatus('Connected to Kabeer', 'connected');
-        document.getElementById('callSubtitle').innerText = 'You are now speaking with Kabeer';
+        setSubtitle("You're now speaking with Kabeer.");
         addLog('📞 Connected to Kabeer.', 'agent');
       }, remaining * 1000 + 300);
     }
@@ -699,7 +744,16 @@
       stream = null;
       updateStatus(reason || 'Call Ended', 'disconnected');
       if (!lastError) document.getElementById('callSubtitle').innerText = 'The call has ended.';
-      document.getElementById('avatar').style.animation = 'none';
+      stopTimer();
+      document.getElementById('avatar').classList.remove('ringing');
+      document.getElementById('muteControl').classList.add('hidden');
+      document.getElementById('endControl').classList.add('hidden');
+      // Offer another call once this one has settled
+      setTimeout(() => {
+        if (aaiWs || relayWs) return; // a new call already started
+        document.getElementById('callLabel').textContent = 'Call again';
+        document.getElementById('callSection').classList.remove('hidden');
+      }, 1200);
     }
 
     window.addEventListener('pagehide', () => {
