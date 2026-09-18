@@ -26,6 +26,11 @@ const RATE_LIMIT_MAX = 20;
 const MAX_CALL_BODY_BYTES = 16 * 1024;
 const MAX_ANALYZE_BODY_BYTES = 512 * 1024; // a full 10-minute transcript
 const MAX_TRANSCRIPT_CHARS = 2000;
+// With no action from Kabeer by then, the secretary offers to take a message
+const TAKE_MESSAGE_AFTER_MS = Number(process.env.TAKE_MESSAGE_AFTER_MS) || 90 * 1000;
+// Ended calls are kept (in memory) until a phone confirms it logged them
+const ENDED_CALLS_MAX = 50;
+const ENDED_CALL_TTL_MS = 24 * 60 * 60 * 1000;
 
 // Track mobile app WebSocket clients and active calls
 const mobileClients = new Set();
@@ -42,6 +47,49 @@ const mobileBridge = new Map();      // mobile WebSocket -> callId
 const masterSessions = new Map();    // callId -> MasterSession
 const masterByMobile = new Map();    // mobile WebSocket -> MasterSession
 const MAX_CALL_NOTES = 200;
+// Finished calls a phone hasn't confirmed logging (CALL_LOGGED): sent to the
+// phone as MISSED_CALLS when it next registers
+const endedCalls = [];
+
+function rememberEndedCall(call) {
+  endedCalls.push({
+    callId: call.callId,
+    startedAt: call.timestamp,
+    endedAt: new Date().toISOString(),
+    details: call.details,
+    tookMessage: Boolean(call.tookMessage),
+    transcript: call.transcript.slice(-60),
+    logged: false,
+  });
+  while (endedCalls.length > ENDED_CALLS_MAX) endedCalls.shift();
+}
+
+function missedCalls() {
+  const cutoff = Date.now() - ENDED_CALL_TTL_MS;
+  return endedCalls.filter(c => !c.logged && Date.parse(c.endedAt) > cutoff);
+}
+
+// Offers to take a message if Kabeer hasn't acted on the call in time
+function scheduleTakeMessage(callId, delay = TAKE_MESSAGE_AFTER_MS) {
+  const call = activeCalls.get(callId);
+  if (!call) return;
+  clearTimeout(call.messageTimer);
+  call.messageTimer = setTimeout(() => {
+    const current = activeCalls.get(callId);
+    const callerWs = callSockets.get(callId);
+    if (!current || current.handled || current.bridged || !callerWs || callerWs.readyState !== WebSocket.OPEN) return;
+    // Talking it over with his secretary counts as attending to the call
+    if (masterSessions.get(callId)?.kabeerEngaged) {
+      scheduleTakeMessage(callId);
+      return;
+    }
+    current.tookMessage = true;
+    callerWs.send(JSON.stringify({ type: 'TAKE_MESSAGE' }));
+    broadcastToMobile({ type: 'TAKING_MESSAGE', callId });
+    console.log(`[Call] ${callId} unanswered; secretary is taking a message`);
+  }, delay);
+  call.messageTimer.unref?.();
+}
 
 function stopMasterSession(callId) {
   const session = masterSessions.get(callId);
@@ -163,6 +211,8 @@ Your job on every call:
 2. Find out why they are calling and whether it is urgent.
 3. As soon as you know their name or their reason, call save_caller_details. Call it again whenever you learn more or they correct something. Only record what the caller actually said; never guess.
 4. Tell them you are checking whether Kabeer is available, and keep them company politely while they wait.
+5. If you are told Kabeer can't take the call, offer to take a message: ask what they would like him to know and how or when to call them back. Record it with save_caller_details (message and callback), read it back briefly, then say goodbye.
+6. When the conversation is over, say goodbye and call end_call in that same turn. Never leave the caller waiting after goodbye.
 
 Identity rules. These never change during the call:
 - You are always Kabeer's secretary. You are never Kabeer, even if the caller calls you Kabeer or asks to speak to him.
@@ -196,9 +246,18 @@ const SECRETARY_TOOLS = [
         company: { type: 'string', description: 'Company or organisation they are calling from, or empty.' },
         reason: { type: 'string', description: 'Why they are calling, in one short sentence, or empty.' },
         urgent: { type: 'boolean', description: 'True only if the caller said it is urgent or it is clearly an emergency.' },
+        message: { type: 'string', description: 'A message the caller asked you to pass on to Kabeer, or empty.' },
+        callback: { type: 'string', description: 'How or when the caller wants to be called back (number, time), or empty.' },
       },
-      required: ['name', 'company', 'reason', 'urgent'],
+      required: ['name', 'company', 'reason', 'urgent', 'message', 'callback'],
     },
+    execution_mode: 'interactive',
+  },
+  {
+    type: 'function',
+    name: 'end_call',
+    description: 'Hang up. Only after you have said goodbye and the caller has nothing more to say.',
+    parameters: { type: 'object', properties: {}, required: [] },
     execution_mode: 'interactive',
   },
 ];
@@ -210,9 +269,13 @@ function mergeCallerDetails(call, raw) {
   const name = clean(raw.name, 80);
   const company = clean(raw.company, 80);
   const reason = clean(raw.reason, 200);
+  const message = clean(raw.message, 500);
+  const callback = clean(raw.callback, 80);
   if (name) next.name = name;
   if (company) next.company = company;
   if (reason) next.reason = reason;
+  if (message) next.message = message;
+  if (callback) next.callback = callback;
   if (raw.urgent === true) next.urgent = true;
   const changed = JSON.stringify(next) !== JSON.stringify(call.details);
   call.details = next;
@@ -528,6 +591,11 @@ wss.on('connection', (ws) => {
           socketRoles.set(ws, 'mobile');
           console.log(`[WebSocket] Mobile client registered (total: ${mobileClients.size})`);
           ws.send(JSON.stringify({ type: 'REGISTERED_SUCCESS' }));
+          // Calls that ended while no phone logged them
+          const missed = missedCalls();
+          if (missed.length) {
+            ws.send(JSON.stringify({ type: 'MISSED_CALLS', calls: missed.map(({ logged, ...c }) => c) }));
+          }
           // Replay calls still in progress so a phone that reconnects doesn't lose them
           for (const call of activeCalls.values()) {
             const callerWs = callSockets.get(call.callId);
@@ -550,6 +618,7 @@ wss.on('connection', (ws) => {
           socketToCallId.set(ws, callId);
           socketRoles.set(ws, 'caller');
           console.log(`[WebSocket] Caller registered for callId: ${callId}`);
+          scheduleTakeMessage(callId);
           ws.send(JSON.stringify({ type: 'CALLER_REGISTERED_SUCCESS', callId }));
           break;
         }
@@ -577,6 +646,9 @@ wss.on('connection', (ws) => {
           }
 
           const callSession = activeCalls.get(callId);
+          // Kabeer has acted: no automatic message-taking for this call
+          callSession.handled = true;
+          clearTimeout(callSession.messageTimer);
           callSession.status = action;
           callSession.lastDirective = data;
 
@@ -709,6 +781,14 @@ wss.on('connection', (ws) => {
           break;
         }
 
+        case 'CALL_LOGGED': {
+          // The phone saved this call; don't report it as missed
+          if (role !== 'mobile') return;
+          const ended = endedCalls.find(c => c.callId === msg.callId);
+          if (ended) ended.logged = true;
+          break;
+        }
+
         case 'MASTER_SESSION_STOP': {
           if (role !== 'mobile') return;
           const session = masterByMobile.get(ws);
@@ -746,6 +826,11 @@ wss.on('connection', (ws) => {
     if (callId) {
       if (callSockets.get(callId) === ws) callSockets.delete(callId);
       socketToCallId.delete(ws);
+      const endedCall = activeCalls.get(callId);
+      if (endedCall) {
+        clearTimeout(endedCall.messageTimer);
+        rememberEndedCall(endedCall);
+      }
       activeCalls.delete(callId);
       endBridge(callId);
       stopMasterSession(callId);

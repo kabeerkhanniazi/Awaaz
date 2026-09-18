@@ -158,6 +158,11 @@
     // Tool results must wait until the reply that called the tool has finished
     let replyActive = false;
     let pendingToolResults = [];
+    // The secretary called end_call mid-reply: hang up when that reply is done
+    let endWhenReplyDone = false;
+    // The caller's last words were a goodbye
+    let callerSaidBye = false;
+    const GOODBYE = /\b(good ?bye|bye|bye-bye)\b/i;
 
     // B6: Check Origin on Page Load
     window.addEventListener('DOMContentLoaded', () => {
@@ -342,6 +347,17 @@
               cleanup('Call Ended');
               return;
             }
+            if (msg.type === 'TAKE_MESSAGE') {
+              // Nobody answered in time: the secretary offers to take a message
+              if (!bridgeActive && !bridgePending) {
+                sendDirective(
+                  "Kabeer can't take the call right now. Tell the caller this politely and offer to take a message: " +
+                  'ask what they would like him to know and how or when to call them back. Speak as his secretary.',
+                  0,
+                );
+              }
+              return;
+            }
             if (msg.type === 'DIRECTIVE_UPDATED') {
               const { action, spokenDirective, directiveVersion, holdMinutes } = msg.data || msg;
 
@@ -452,6 +468,12 @@
           else if (msg.type === 'reply.done') {
             replyActive = false;
             flushToolResults();
+            if (endWhenReplyDone) {
+              endWhenReplyDone = false;
+              endAfterPlayback();
+            }
+            // A directive held back while she was answering goes out now
+            if (pendingDirective && pendingDirective.waitedForReply) dispatchDirective();
             // Caller barged in: silence audio already queued for the old reply
             if (msg.status === 'interrupted') stopPlayback();
           }
@@ -476,6 +498,8 @@
           }
           else if (msg.type === 'transcript.user') {
             addLog('You: ' + msg.text, 'you');
+            // Only the caller's latest words count ("bye... oh, one more thing")
+            callerSaidBye = GOODBYE.test(msg.text);
             if (relayWs && relayWs.readyState === WebSocket.OPEN) {
               relayWs.send(JSON.stringify({
                 type: 'TRANSCRIPT_UPDATE',
@@ -487,6 +511,12 @@
           }
           else if (msg.type === 'transcript.agent') {
             addLog('Secretary: ' + msg.text, 'agent');
+            // Both said goodbye: hang up like a phone call would, in case the
+            // secretary doesn't call end_call herself
+            if (callerSaidBye && GOODBYE.test(msg.text) && !msg.interrupted && !bridgeActive && !bridgePending) {
+              callerSaidBye = false;
+              endAfterPlayback();
+            }
             if (relayWs && relayWs.readyState === WebSocket.OPEN) {
               relayWs.send(JSON.stringify({
                 type: 'TRANSCRIPT_UPDATE',
@@ -582,8 +612,17 @@
           company: args.company || '',
           reason: args.reason || '',
           urgent: args.urgent === true,
+          message: args.message || '',
+          callback: args.callback || '',
         });
         ok = true;
+      } else if (tool.name === 'end_call') {
+        // The secretary finished the conversation: hang up once her goodbye
+        // (usually still arriving) has been played
+        console.log('[Call] secretary ended the call');
+        ok = true;
+        if (replyActive) endWhenReplyDone = true;
+        else endAfterPlayback();
       }
       pendingToolResults.push({
         type: 'tool.result',
@@ -625,6 +664,17 @@
     function dispatchDirective() {
       const d = pendingDirective;
       if (!d || !aaiWs || aaiWs.readyState !== WebSocket.OPEN) return;
+      // reply.create sent while the agent is still answering is silently
+      // dropped: wait for that reply to finish (with a safety net)
+      if (replyActive && !d.waitedForReply) {
+        d.waitedForReply = true;
+        clearTimeout(d.timer);
+        d.timer = setTimeout(() => {
+          if (pendingDirective === d) dispatchDirective();
+        }, 15000);
+        return;
+      }
+      d.waitedForReply = false;
       d.attempts++;
       d.replyId = null;
       d.awaitingReply = true;
@@ -725,6 +775,8 @@
       endAfterDirective = false;
       replyActive = false;
       pendingToolResults = [];
+      endWhenReplyDone = false;
+      callerSaidBye = false;
       if (pendingDirective) {
         clearTimeout(pendingDirective.timer);
         pendingDirective = null;

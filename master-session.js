@@ -142,6 +142,8 @@ function detailsFrom(details = {}, context = null) {
     `Reason: ${details.reason || 'not given yet'}`,
     `Urgent: ${details.urgent ? 'yes' : 'not stated'}`,
   ];
+  if (details.message) lines.push(`Message for Kabeer: ${details.message}`);
+  if (details.callback) lines.push(`Call back: ${details.callback}`);
   if (context?.relationship) {
     // From Kabeer's own contacts on his phone
     lines.push(`In Kabeer's contacts as: ${context.relationship}`);
@@ -178,6 +180,8 @@ class MasterSession {
     this.pendingEnd = null;        // { command, timer } while waiting out END_GRACE_MS
     this.userTurnOpen = false;     // Kabeer spoke and the agent hasn't answered yet
     this.lastTaskAt = 0;
+    this.kabeerEngaged = false;    // Kabeer has spoken to her about this call
+    this.queuedReplies = [];       // reply.create waiting for the current reply to finish
     this.identityBriefingTimer = null; // first briefing, waiting briefly for CALLER_CONTEXT
 
     this.ws = new WebSocket('wss://agents.assemblyai.com/v1/ws', {
@@ -256,6 +260,8 @@ class MasterSession {
         this._flushToolResults();
         // An interrupted reply means Kabeer is talking again: wait for the next answer
         if (this.pendingEnd && msg.status !== 'interrupted' && !this.userTurnOpen) this._armEnd();
+        // A briefing held back while she was answering goes out now
+        if (this.queuedReplies.length) this._sendAgent(this.queuedReplies.shift());
         this._sendPhone({ type: 'MASTER_SESSION_STATE', callId: this.call.callId, state: 'listening' });
         break;
       case 'input.speech.started':
@@ -268,6 +274,8 @@ class MasterSession {
         if (this.pendingEnd) this._armEnd(6000);
         break;
       case 'transcript.user':
+        // Kabeer is talking it over: the gateway won't have the caller leave a message
+        this.kabeerEngaged = true;
         this._sendPhone({ type: 'MASTER_TRANSCRIPT', callId: this.call.callId, speaker: 'Master', text: msg.text });
         break;
       case 'transcript.agent':
@@ -430,6 +438,12 @@ class MasterSession {
   }
 
   _sendAgent(payload) {
+    // reply.create sent while the agent is answering is silently dropped by
+    // the API: hold it until that reply is done
+    if (payload.type === 'reply.create' && this.replyActive) {
+      this.queuedReplies.push(payload);
+      return;
+    }
     if (this.ws.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(payload));
   }
 
