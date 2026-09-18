@@ -34,7 +34,7 @@ Acting on his instructions. Call the matching tool, then confirm in a few words:
 - hold_caller: he wants the caller to wait. Pass the minutes he says; use 2 if he doesn't say.
 - relay_message: he wants the caller told something, for example "tell him I'll call back tomorrow". Pass his message as he said it. Relaying a message does NOT end the call.
 - end_call: only when he clearly says to end or finish the call ("end the call", "let him go", "hang up", "that's all").
-- add_task: whenever he asks you to remind him of something, note something, or follow up later ("remind me to send the invoice"). Use it in addition to any other tool he asks for in the same breath.
+- add_task: whenever he asks you to remind him of something, note something, or follow up later ("remind me to send the invoice"). Use it in addition to any other tool he asks for in the same breath. If he says when ("tomorrow", "by Friday", "next Monday"), pass the due date, worked out from today's date below.
 If you are unsure whether he wants the call ended, relay his message and ask him whether to end the call. If you are not sure what he wants at all, ask him.
 When ending the call, confirm in at most five words (for example "Done, ending the call") and then stay quiet.`;
 
@@ -87,8 +87,12 @@ const TOOLS = [
       type: 'object',
       properties: {
         task: { type: 'string', description: 'The task, phrased as a to-do, e.g. "Send John Carter a copy of the invoice".' },
+        due: {
+          type: 'string',
+          description: 'Due date as YYYY-MM-DD if Kabeer said when, otherwise an empty string.',
+        },
       },
-      required: ['task'],
+      required: ['task', 'due'],
     },
     execution_mode: 'interactive',
   },
@@ -107,11 +111,23 @@ function toCommand(name, args) {
       return args.message ? { command: 'relay', message: String(args.message).slice(0, 300) } : null;
     case 'end_call':
       return { command: 'end' };
-    case 'add_task':
-      return args.task ? { command: 'task', task: String(args.task).slice(0, 300) } : null;
+    case 'add_task': {
+      if (!args.task) return null;
+      const due = /^\d{4}-\d{2}-\d{2}$/.test(String(args.due || '')) ? String(args.due) : undefined;
+      return { command: 'task', task: String(args.task).slice(0, 300), ...(due ? { due } : {}) };
+    }
     default:
       return null;
   }
+}
+
+// Kabeer's local date, for due dates like "tomorrow" (the server runs in UTC)
+const TIME_ZONE = process.env.KABEER_TIMEZONE || 'Asia/Karachi';
+
+function todayLine(now = new Date()) {
+  const date = new Intl.DateTimeFormat('en-CA', { timeZone: TIME_ZONE, year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
+  const weekday = new Intl.DateTimeFormat('en-US', { timeZone: TIME_ZONE, weekday: 'long' }).format(now);
+  return `Today is ${weekday}, ${date} (Kabeer's time).`;
 }
 
 function notesFrom(transcript) {
@@ -175,7 +191,7 @@ class MasterSession {
   }
 
   _prompt() {
-    return `${BASE_PROMPT}\n\nConfirmed caller details:\n${detailsFrom(this.call.details)}\n\nCall notes so far:\n${notesFrom(this.call.transcript)}`;
+    return `${BASE_PROMPT}\n\n${todayLine()}\n\nConfirmed caller details:\n${detailsFrom(this.call.details, this.call.context)}\n\nCall notes so far:\n${notesFrom(this.call.transcript)}`;
   }
 
   _configure() {
