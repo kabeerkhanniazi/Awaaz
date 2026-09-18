@@ -6,13 +6,25 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const WebSocket = require('ws');
 require('dotenv').config();
 
 const PORT = process.env.PORT || 3000;
 const ASSEMBLYAI_KEY = process.env.ASSEMBLYAI_API_KEY || '';
-const GATEWAY_AUTH_SECRET = process.env.GATEWAY_AUTH_SECRET || 'awaaz-secret-key';
-const BUILD_SHA = process.env.BUILD_SHA || 'local-dev';
+// No default: this code is public, so any built-in value would be known to everyone.
+// Without it, phones cannot register (callers still work).
+const GATEWAY_AUTH_SECRET = process.env.GATEWAY_AUTH_SECRET || '';
+const BUILD_SHA = process.env.BUILD_SHA || process.env.RAILWAY_GIT_COMMIT_SHA || 'local-dev';
+
+// Calls whose caller never connects, or who hung up, are forgotten after this
+const STALE_CALL_MS = 2 * 60 * 1000;
+// Per-IP budget for the public endpoints that start a call (token + register)
+const RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
+const RATE_LIMIT_MAX = 20;
+const MAX_CALL_BODY_BYTES = 16 * 1024;
+const MAX_ANALYZE_BODY_BYTES = 512 * 1024; // a full 10-minute transcript
+const MAX_TRANSCRIPT_CHARS = 2000;
 
 // Track mobile app WebSocket clients and active calls
 const mobileClients = new Set();
@@ -20,6 +32,58 @@ const activeCalls = new Map();
 const callSockets = new Map();       // callId -> caller WebSocket
 const socketToCallId = new Map();    // WebSocket -> callId
 const socketRoles = new Map();       // WebSocket -> 'mobile' | 'caller'
+const rateLimits = new Map();        // client IP -> { windowStart, count }
+
+function secretMatches(candidate) {
+  if (!GATEWAY_AUTH_SECRET || typeof candidate !== 'string' || !candidate) return false;
+  // Compare digests so the comparison time doesn't depend on the secret
+  const a = crypto.createHash('sha256').update(candidate).digest();
+  const b = crypto.createHash('sha256').update(GATEWAY_AUTH_SECRET).digest();
+  return crypto.timingSafeEqual(a, b);
+}
+
+function clientIp(req) {
+  // Railway terminates TLS at its proxy; the first forwarded address is the client
+  const forwarded = req.headers['x-forwarded-for'];
+  if (forwarded) return String(forwarded).split(',')[0].trim();
+  return req.socket.remoteAddress || 'unknown';
+}
+
+function rateLimited(req) {
+  const ip = clientIp(req);
+  const now = Date.now();
+  let entry = rateLimits.get(ip);
+  if (!entry || now - entry.windowStart > RATE_LIMIT_WINDOW_MS) {
+    entry = { windowStart: now, count: 0 };
+    rateLimits.set(ip, entry);
+  }
+  entry.count++;
+  return entry.count > RATE_LIMIT_MAX;
+}
+
+function sendTooManyRequests(res) {
+  res.writeHead(429, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ error: 'Too many calls from this network. Please try again in a few minutes.' }));
+}
+
+// Reads a request body, rejecting anything larger than maxBytes
+function readBody(req, res, maxBytes, onBody) {
+  let body = '';
+  let tooLarge = false;
+  req.on('data', chunk => {
+    if (tooLarge) return;
+    body += chunk;
+    if (body.length > maxBytes) {
+      tooLarge = true;
+      res.writeHead(413, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Request body too large' }));
+      req.destroy();
+    }
+  });
+  req.on('end', () => {
+    if (!tooLarge) onBody(body);
+  });
+}
 
 // Secretary persona — Single Source of Truth.
 // The caller page sends these to AssemblyAI inline as the first session.update
@@ -117,6 +181,10 @@ const server = http.createServer(async (req, res) => {
   // GET /api/voice-token — mint a single-use AssemblyAI token plus the persona
   // the caller page must send as its first session.update
   if (pathname === '/api/voice-token' && req.method === 'GET') {
+    if (rateLimited(req)) {
+      sendTooManyRequests(res);
+      return;
+    }
     if (!ASSEMBLYAI_KEY) {
       res.writeHead(503, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'ASSEMBLYAI_API_KEY is not set in the server environment.' }));
@@ -166,31 +234,28 @@ const server = http.createServer(async (req, res) => {
   // Called by the public caller page, so it cannot carry a secret: anything
   // embedded in that page is readable by every visitor.
   if (pathname === '/api/call' && req.method === 'POST') {
-    let body = '';
-    req.on('data', chunk => body += chunk);
-    req.on('end', () => {
+    if (rateLimited(req)) {
+      sendTooManyRequests(res);
+      return;
+    }
+    readBody(req, res, MAX_CALL_BODY_BYTES, (body) => {
       try {
         const payload = JSON.parse(body);
-        const callId = 'call_' + Date.now();
+        // Unguessable: the callId is what lets a socket speak for a call
+        const callId = `call_${crypto.randomUUID()}`;
         const callData = {
           callId,
-          callerName: payload.callerName || 'Web Caller',
-          phoneNumber: payload.phoneNumber || '+1 (555) 019-2834',
-          topic: payload.topic || 'Voice Call',
+          callerName: String(payload.callerName || 'Web Caller').slice(0, 80),
+          phoneNumber: String(payload.phoneNumber || '+1 (555) 019-2834').slice(0, 40),
+          topic: String(payload.topic || 'Voice Call').slice(0, 120),
           timestamp: new Date().toISOString(),
+          createdAt: Date.now(),
           status: 'screening',
         };
         activeCalls.set(callId, callData);
 
         // Immediately notify all mobile clients
-        broadcastToMobile({
-          type: 'INCOMING_CALL',
-          callId: callData.callId,
-          callerName: callData.callerName,
-          phoneNumber: callData.phoneNumber,
-          topic: callData.topic,
-          timestamp: callData.timestamp,
-        });
+        broadcastToMobile(incomingCallMessage(callData));
 
         console.log(`[Call] Incoming ${callId} — notified ${mobileClients.size} mobile client(s)`);
 
@@ -206,9 +271,7 @@ const server = http.createServer(async (req, res) => {
 
   // POST /api/analyze-call — Real-call LeMUR / intelligence gap (C8)
   if (pathname === '/api/analyze-call' && req.method === 'POST') {
-    let body = '';
-    req.on('data', chunk => body += chunk);
-    req.on('end', () => {
+    readBody(req, res, MAX_ANALYZE_BODY_BYTES, (body) => {
       try {
         const payload = JSON.parse(body);
         const transcripts = payload.transcript || [];
@@ -260,7 +323,10 @@ const server = http.createServer(async (req, res) => {
 });
 
 // === 3. WebSocket Server with Targeted Call Routing (C1, C2, C3) ===
-const wss = new WebSocket.Server({ server });
+// Roles: a socket is anonymous until it registers. Only 'mobile' sockets (which
+// proved the gateway secret) may direct calls; a 'caller' socket may only report
+// on the one call it registered for.
+const wss = new WebSocket.Server({ server, maxPayload: 64 * 1024 });
 
 wss.on('connection', (ws) => {
   console.log('[WebSocket] New client connected');
@@ -269,13 +335,16 @@ wss.on('connection', (ws) => {
     try {
       const msg = JSON.parse(message);
       const type = msg.type;
+      const role = socketRoles.get(ws);
 
       switch (type) {
         case 'REGISTER_MOBILE': {
-          const authSecret = msg.authSecret || msg.secret;
-          if (GATEWAY_AUTH_SECRET && authSecret && authSecret !== GATEWAY_AUTH_SECRET) {
-            console.warn('[WebSocket] Mobile client auth failure');
-            ws.send(JSON.stringify({ type: 'AUTH_FAILED', error: 'Invalid gateway auth secret' }));
+          if (!secretMatches(msg.authSecret || msg.secret)) {
+            const error = GATEWAY_AUTH_SECRET
+              ? 'Invalid gateway auth secret'
+              : 'GATEWAY_AUTH_SECRET is not configured on the server';
+            console.warn(`[WebSocket] Mobile client auth failure: ${error}`);
+            ws.send(JSON.stringify({ type: 'AUTH_FAILED', error }));
             ws.close();
             return;
           }
@@ -283,22 +352,37 @@ wss.on('connection', (ws) => {
           socketRoles.set(ws, 'mobile');
           console.log(`[WebSocket] Mobile client registered (total: ${mobileClients.size})`);
           ws.send(JSON.stringify({ type: 'REGISTERED_SUCCESS' }));
+          // Replay calls still in progress so a phone that reconnects doesn't lose them
+          for (const call of activeCalls.values()) {
+            const callerWs = callSockets.get(call.callId);
+            if (callerWs && callerWs.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify(incomingCallMessage(call)));
+            }
+          }
           break;
         }
 
         case 'REGISTER_CALLER': {
           const callId = msg.callId;
-          if (callId) {
-            callSockets.set(callId, ws);
-            socketToCallId.set(ws, callId);
-            socketRoles.set(ws, 'caller');
-            console.log(`[WebSocket] Caller registered for callId: ${callId}`);
-            ws.send(JSON.stringify({ type: 'CALLER_REGISTERED_SUCCESS', callId }));
+          const existing = callSockets.get(callId);
+          if (role || !activeCalls.has(callId) || (existing && existing.readyState === WebSocket.OPEN)) {
+            console.warn(`[WebSocket] Rejected caller registration for ${callId}`);
+            ws.send(JSON.stringify({ type: 'CALLER_REGISTER_FAILED', callId: callId || null }));
+            return;
           }
+          callSockets.set(callId, ws);
+          socketToCallId.set(ws, callId);
+          socketRoles.set(ws, 'caller');
+          console.log(`[WebSocket] Caller registered for callId: ${callId}`);
+          ws.send(JSON.stringify({ type: 'CALLER_REGISTERED_SUCCESS', callId }));
           break;
         }
 
         case 'MASTER_DIRECTIVE': {
+          if (role !== 'mobile') {
+            console.warn('[WebSocket] MASTER_DIRECTIVE from unauthenticated socket ignored');
+            return;
+          }
           // Envelope: { callId, action, spokenDirective, directiveVersion }
           const data = msg.data || msg;
           const { callId, action, spokenDirective, directiveVersion } = data;
@@ -344,33 +428,33 @@ wss.on('connection', (ws) => {
         }
 
         case 'DIRECTIVE_STATE':
-        case 'DIRECTIVE_FAILED': {
-          // B3: Relay caller directive status back to mobile clients
-          console.log(`[Relay] ${type} for callId: ${msg.callId}, state=${msg.state}, reason=${msg.reason}`);
-          broadcastToMobile(msg);
-          break;
-        }
-
-        case 'TRANSCRIPT_UPDATE': {
-          // Forward speech turn from web caller exclusively to mobile clients (C1)
-          const payload = msg.data || msg;
-          broadcastToMobile({
-            type: 'TRANSCRIPT_UPDATE',
-            callId: payload.callId,
-            speaker: payload.speaker,
-            text: payload.text,
-            isFinal: payload.isFinal ?? true,
-          });
-          break;
-        }
-
+        case 'DIRECTIVE_FAILED':
+        case 'TRANSCRIPT_UPDATE':
         case 'SESSION_EXPIRED': {
-          // B7: Session 10-minute expiry
-          broadcastToMobile({
-            type: 'SESSION_EXPIRED',
-            callId: msg.callId,
-            reason: '10_minute_limit',
-          });
+          // Caller reports go to phones only, always tagged with the caller's
+          // own callId, and rebuilt field by field so nothing else passes through
+          if (role !== 'caller') {
+            console.warn(`[WebSocket] ${type} from non-caller socket ignored`);
+            return;
+          }
+          const callId = socketToCallId.get(ws);
+          const payload = msg.data || msg;
+          if (type === 'DIRECTIVE_STATE') {
+            broadcastToMobile({ type, callId, state: String(payload.state || ''), version: Number(payload.version) || 0 });
+          } else if (type === 'DIRECTIVE_FAILED') {
+            broadcastToMobile({ type, callId, reason: String(payload.reason || 'unknown'), version: Number(payload.version) || 0 });
+          } else if (type === 'TRANSCRIPT_UPDATE') {
+            const speaker = payload.speaker === 'Secretary' ? 'Secretary' : 'Caller';
+            broadcastToMobile({
+              type,
+              callId,
+              speaker,
+              text: String(payload.text || '').slice(0, MAX_TRANSCRIPT_CHARS),
+              isFinal: payload.isFinal ?? true,
+            });
+          } else {
+            broadcastToMobile({ type, callId, reason: '10_minute_limit' });
+          }
           break;
         }
 
@@ -391,8 +475,9 @@ wss.on('connection', (ws) => {
     }
     const callId = socketToCallId.get(ws);
     if (callId) {
-      callSockets.delete(callId);
+      if (callSockets.get(callId) === ws) callSockets.delete(callId);
       socketToCallId.delete(ws);
+      activeCalls.delete(callId);
       console.log(`[WebSocket] Caller disconnected for ${callId}`);
       // Notify mobile client caller ended
       broadcastToMobile({
@@ -404,12 +489,39 @@ wss.on('connection', (ws) => {
   });
 });
 
+function incomingCallMessage(call) {
+  return {
+    type: 'INCOMING_CALL',
+    callId: call.callId,
+    callerName: call.callerName,
+    phoneNumber: call.phoneNumber,
+    topic: call.topic,
+    timestamp: call.timestamp,
+  };
+}
+
 function broadcastToMobile(payload) {
   const jsonStr = JSON.stringify(payload);
   mobileClients.forEach(ws => {
     if (ws.readyState === WebSocket.OPEN) ws.send(jsonStr);
   });
 }
+
+// Forget calls whose caller page registered but never connected its socket,
+// and expire old rate-limit windows
+setInterval(() => {
+  const now = Date.now();
+  for (const [callId, call] of activeCalls) {
+    if (!callSockets.has(callId) && now - call.createdAt > STALE_CALL_MS) {
+      activeCalls.delete(callId);
+      broadcastToMobile({ type: 'CALLER_HUNG_UP', callId });
+      console.log(`[Call] ${callId} never connected; removed`);
+    }
+  }
+  for (const [ip, entry] of rateLimits) {
+    if (now - entry.windowStart > RATE_LIMIT_WINDOW_MS) rateLimits.delete(ip);
+  }
+}, 60 * 1000).unref();
 
 // === 4. Start Server ===
 server.listen(PORT, '0.0.0.0', () => {
@@ -422,6 +534,9 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log('='.repeat(60));
   if (!ASSEMBLYAI_KEY) {
     console.error('[ERROR] ASSEMBLYAI_API_KEY not found in environment. Callers will get HTTP 503.');
+  }
+  if (!GATEWAY_AUTH_SECRET) {
+    console.error('[ERROR] GATEWAY_AUTH_SECRET not set. The phone app cannot connect until it is.');
   }
 });
 
