@@ -23,7 +23,7 @@
       border-radius: 24px;
       padding: 36px;
       width: 100%;
-      max-width: 440px;
+      max-width: 460px;
       box-shadow: 0 24px 48px rgba(0,0,0,0.6);
       text-align: center;
     }
@@ -37,6 +37,18 @@
     }
     h1 { font-family: 'Outfit', sans-serif; font-size: 24px; color: #F0F6FC; }
     .subtitle { font-size: 13px; color: #8B949E; margin-top: 4px; }
+    .warning-banner {
+      display: none;
+      background: rgba(218, 54, 51, 0.15);
+      border: 1px solid #DA3633;
+      border-radius: 12px;
+      padding: 12px;
+      margin-top: 16px;
+      font-size: 12px;
+      color: #F85149;
+      text-align: left;
+      line-height: 1.4;
+    }
     .btn-call {
       width: 100%; margin-top: 24px;
       background: #2F80ED; color: #FFF; border: none;
@@ -72,7 +84,7 @@
     .call-status { font-size: 16px; font-weight: 700; color: #27AE60; margin-bottom: 6px; }
     .call-subtitle { font-size: 13px; color: #8B949E; margin-bottom: 16px; }
     .transcript {
-      text-align: left; max-height: 200px; overflow-y: auto;
+      text-align: left; max-height: 220px; overflow-y: auto;
       background: #0D1117; border: 1px solid #30363D;
       border-radius: 12px; padding: 12px;
       font-size: 12px; line-height: 1.6;
@@ -80,6 +92,7 @@
     }
     .transcript .you { color: #58A6FF; }
     .transcript .agent { color: #3FB950; }
+    .transcript .error { color: #F85149; font-weight: 600; }
     .status-dot {
       display: inline-block; width: 8px; height: 8px;
       border-radius: 50%; margin-right: 6px;
@@ -96,7 +109,13 @@
     <h1>Voice AI</h1>
     <p class="subtitle">Kabeer's AI Executive Secretary</p>
 
-    <!-- Initial: Just the call button -->
+    <!-- B6: Secure Origin Warning -->
+    <div class="warning-banner" id="insecureWarning">
+      ⚠️ <strong>Insecure Origin Detected:</strong> Microphone capture is prohibited by browsers over unencrypted HTTP.
+      Please open this page over <strong>HTTPS</strong> or via <strong>localhost</strong>.
+    </div>
+
+    <!-- Initial: Call button -->
     <div id="callSection">
       <button class="btn-call" id="btnCall" onclick="startCall()">📞 Call Kabeer</button>
     </div>
@@ -117,41 +136,41 @@
 
   <script>
     // --- State ---
-    let aaiWs = null;       // WebSocket to AssemblyAI
-    let relayWs = null;     // WebSocket to our Node.js server (for mobile directives)
+    let aaiWs = null;
+    let relayWs = null;
     let audioCtx = null;
     let stream = null;
     let workletNode = null;
     let ready = false;
     let playbackTime = 0;
-    let currentCallId = null;  // Track callId for relay messages
+    let currentCallId = null;
+    let sessionTimer = null;
 
-    // Send data to the phone via relay WebSocket
-    function relayToPhone(type, data) {
-      if (relayWs && relayWs.readyState === WebSocket.OPEN) {
-        relayWs.send(JSON.stringify({ type, data: { ...data, callId: currentCallId } }));
+    // Persona from /api/voice-token (single source of truth on the gateway).
+    // Sent to AssemblyAI as the first session.update of the session.
+    let persona = null;
+
+    // Directives are spoken with reply.create, which leaves the system prompt
+    // untouched. pendingDirective tracks the reply it produced so "spoken" is
+    // only reported for that reply.
+    let lastAppliedDirectiveVersion = 0;
+    let pendingDirective = null;
+
+    // Agent audio scheduled for playback, stopped when the caller barges in
+    let scheduledSources = [];
+
+    // B6: Check Origin on Page Load
+    window.addEventListener('DOMContentLoaded', () => {
+      const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+      const isHttps = window.location.protocol === 'https:';
+      if (!isLocal && !isHttps) {
+        document.getElementById('insecureWarning').style.display = 'block';
+        const callBtn = document.getElementById('btnCall');
+        callBtn.disabled = true;
+        callBtn.style.opacity = '0.5';
+        callBtn.style.cursor = 'not-allowed';
       }
-    }
-
-    const SECRETARY_PROMPT = `You are Kabeer's AI Executive Secretary. Your role is to professionally screen and manage incoming calls.
-
-When someone calls:
-1. Greet them warmly and introduce yourself as Kabeer's AI secretary
-2. Ask for their name if they haven't provided it
-3. Ask about the purpose or nature of their call
-4. Let them know you're checking if Kabeer is available
-5. Engage in polite, professional conversation while waiting for Kabeer's response
-6. If Kabeer sends a directive, relay it naturally to the caller
-
-Behavior rules:
-- Be warm, professional, and human-like
-- Keep responses concise (1-2 sentences max)
-- Never reveal you are an AI unless directly asked
-- If caller is rude, remain calm and professional
-- Ask clarifying questions about their needs
-- Remember the caller's name and use it occasionally`;
-
-    const SECRETARY_GREETING = "Hello! You've reached Kabeer's line. I'm his secretary. May I know who's calling please?";
+    });
 
     function addLog(text, cls) {
       const el = document.getElementById('transcript');
@@ -162,6 +181,28 @@ Behavior rules:
       el.scrollTop = el.scrollHeight;
     }
 
+    function updateStatus(text, state) {
+      const dot = document.getElementById('statusDot');
+      dot.className = 'status-dot ' + state;
+      const statusEl = document.getElementById('callStatus');
+      statusEl.innerHTML = '';
+      statusEl.appendChild(dot);
+      statusEl.appendChild(document.createTextNode(' ' + text));
+    }
+
+    // B4: Directive Sanitization
+    function sanitizeDirective(rawText) {
+      if (!rawText) return '';
+      // Strip control chars and newlines
+      let clean = rawText.replace(/[\x00-\x1F\x7F\r\n]+/g, ' ').trim();
+      // The directive is embedded in double quotes in the agent instructions
+      clean = clean.replace(/"/g, "'");
+      // Cap length at 300 chars
+      if (clean.length > 300) clean = clean.substring(0, 300);
+      return clean;
+    }
+
+    // B5: Correct Audio Gesture Ordering
     async function startCall() {
       // Hide call button, show calling UI
       document.getElementById('callSection').style.display = 'none';
@@ -169,30 +210,109 @@ Behavior rules:
       document.getElementById('btnEnd').style.display = 'block';
 
       try {
-        // 1. Get token from our server
-        updateStatus('Fetching token...', 'connecting');
-        const tokenRes = await fetch('/api/voice-token');
-        if (!tokenRes.ok) throw new Error('Failed to get voice token: ' + await tokenRes.text());
-        const { token, agentId } = await tokenRes.json();
+        // Step 1: Construct AudioContext synchronously (first statement, NO await before it)
+        const AudioCtxClass = window.AudioContext || window.webkitAudioContext;
+        audioCtx = new AudioCtxClass();
 
-        // 2. Setup audio context (default rate, resample in worklet)
-        audioCtx = new AudioContext();
-        await audioCtx.resume();
+        // Step 2: Call resume() synchronously
+        const resumePromise = audioCtx.resume();
+
+        // Step 3: Await getUserMedia with differentiated errors
+        updateStatus('Requesting mic access...', 'connecting');
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+          });
+        } catch (micErr) {
+          if (micErr.name === 'NotAllowedError') {
+            throw new Error('Microphone permission was denied by user or browser policy.');
+          } else if (micErr.name === 'NotFoundError' || micErr.name === 'DevicesNotFoundError') {
+            throw new Error('No microphone device was detected on your system.');
+          } else if (micErr.name === 'SecurityError') {
+            throw new Error('Insecure origin: Microphone capture is blocked on unencrypted HTTP.');
+          } else {
+            throw new Error('Microphone access failed: ' + micErr.message);
+          }
+        }
+
+        // Step 4: Await AudioContext resume & load AudioWorklet module
+        await resumePromise;
         await audioCtx.audioWorklet.addModule('/pcm-processor.js');
 
-        // 3. Get microphone
-        stream = await navigator.mediaDevices.getUserMedia({
-          audio: { echoCancellation: true, noiseSuppression: false },
+        // Step 5: Network calls are now safe (user gesture context already claimed)
+        updateStatus('Fetching token & persona...', 'connecting');
+        const tokenRes = await fetch('/api/voice-token');
+        if (!tokenRes.ok) {
+          let detail = await tokenRes.text();
+          try { detail = JSON.parse(detail).error || detail; } catch (_) {}
+          throw new Error(`Gateway ${tokenRes.status}: ${detail}`);
+        }
+
+        const { token, systemPrompt, greeting, voice } = await tokenRes.json();
+        // Without a persona the agent would run as a generic assistant: refuse instead
+        if (!token || !systemPrompt) {
+          throw new Error('Gateway returned an incomplete voice session (missing token or persona).');
+        }
+        persona = { systemPrompt, greeting, voice };
+
+        // Register call with Gateway
+        updateStatus('Registering call session...', 'connecting');
+        const callRes = await fetch('/api/call', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ callerName: 'Web Caller', topic: 'Direct Voice Call' }),
         });
+        if (!callRes.ok) throw new Error('Call registration rejected by gateway: ' + await callRes.text());
+        const callData = await callRes.json();
+        currentCallId = callData.callId;
+
+        // Connect Gateway Relay WebSocket (C1: call routing)
+        const relayProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        relayWs = new WebSocket(`${relayProtocol}//${window.location.host}`);
+        relayWs.onopen = () => {
+          console.log('[Relay] Connected to gateway. Registering caller for', currentCallId);
+          relayWs.send(JSON.stringify({
+            type: 'REGISTER_CALLER',
+            callId: currentCallId,
+          }));
+        };
+
+        // Handle incoming Master Directives from mobile app
+        relayWs.onmessage = (event) => {
+          try {
+            const msg = JSON.parse(event.data);
+            if (msg.type === 'DIRECTIVE_UPDATED') {
+              const { action, spokenDirective, directiveVersion } = msg.data || msg;
+
+              // B3: Monotonically increasing directive version check
+              const ver = Number(directiveVersion) || 1;
+              if (ver <= lastAppliedDirectiveVersion) {
+                console.log(`[Directive] Ignoring stale version ${ver} (current: ${lastAppliedDirectiveVersion})`);
+                return;
+              }
+              lastAppliedDirectiveVersion = ver;
+
+              const instructions = buildDirectiveInstructions(action, spokenDirective);
+              if (!instructions) return;
+              console.log(`[Directive] v${ver} ${action}: ${instructions}`);
+              sendDirective(instructions, ver);
+            }
+          } catch (e) {
+            console.error('[Relay] Directive error:', e);
+          }
+        };
+
+        // Setup AudioWorklet for 24 kHz PCM16 downsampling
         const source = audioCtx.createMediaStreamSource(stream);
         workletNode = new AudioWorkletNode(audioCtx, 'pcm-processor', {
           processorOptions: {
             inputSampleRate: audioCtx.sampleRate,
             targetSampleRate: 24000,
+            chunkSamples: 1200, // 50 ms per input.audio message
           },
         });
 
-        // 4. Connect to AssemblyAI Voice Agent
+        // Connect to AssemblyAI Voice Agent
         updateStatus('Connecting to AI Secretary...', 'connecting');
         const wsUrl = new URL('wss://agents.assemblyai.com/v1/ws');
         wsUrl.searchParams.set('token', token);
@@ -200,7 +320,6 @@ Behavior rules:
 
         playbackTime = audioCtx.currentTime;
 
-        // Stream mic audio to AssemblyAI when ready
         workletNode.port.onmessage = (e) => {
           if (ready && aaiWs && aaiWs.readyState === WebSocket.OPEN) {
             const b64 = btoa(String.fromCharCode(...new Uint8Array(e.data)));
@@ -210,14 +329,16 @@ Behavior rules:
         source.connect(workletNode).connect(audioCtx.destination);
 
         aaiWs.addEventListener('open', () => {
-          updateStatus('Authenticating...', 'connecting');
-          // Always send explicit system_prompt, greeting, and voice to AssemblyAI
+          updateStatus('Setting up secretary...', 'connecting');
+          // Must be the first message: AssemblyAI configures the agent from it
+          // and only then replies with session.ready. Greeting and voice cannot
+          // be changed after this point.
           aaiWs.send(JSON.stringify({
             type: 'session.update',
             session: {
-              system_prompt: SECRETARY_PROMPT,
-              greeting: SECRETARY_GREETING,
-              voice: { voice_id: 'alba' },
+              system_prompt: persona.systemPrompt,
+              greeting: persona.greeting,
+              output: { voice: persona.voice },
             },
           }));
         });
@@ -227,11 +348,40 @@ Behavior rules:
 
           if (msg.type === 'session.ready') {
             ready = true;
+            console.log('[AssemblyAI] session.ready', msg.session_id, msg.config);
             updateStatus('AI Secretary Connected', 'connected');
-            document.getElementById('callSubtitle').innerText = 'Speak naturally — the AI secretary is listening';
+            document.getElementById('callSubtitle').innerText = 'Speak naturally — the executive secretary is screening';
+
+            // A directive that arrived before the session was ready
+            if (pendingDirective && pendingDirective.attempts === 0) dispatchDirective();
+
+            // B7: 10-minute session lifetime guard
+            if (sessionTimer) clearTimeout(sessionTimer);
+            sessionTimer = setTimeout(() => {
+              addLog('⏱️ Session ended — 10 minute limit reached.', 'error');
+              updateStatus('Session Ended (10m limit)', 'disconnected');
+              if (relayWs && relayWs.readyState === WebSocket.OPEN) {
+                relayWs.send(JSON.stringify({ type: 'SESSION_EXPIRED', callId: currentCallId }));
+              }
+              cleanup('Session Ended (10m limit)');
+            }, 600000);
+          }
+          else if (msg.type === 'session.updated') {
+            console.log('[AssemblyAI] session.updated', msg.config);
+          }
+          else if (msg.type === 'reply.started') {
+            const d = pendingDirective;
+            if (d && d.awaitingReply) {
+              // First reply after reply.create is the directive being spoken
+              d.awaitingReply = false;
+              d.replyId = msg.reply_id;
+              clearTimeout(d.timer);
+              d.timer = setTimeout(() => {
+                if (pendingDirective === d) retryOrFailDirective('no_agent_transcript');
+              }, 30000);
+            }
           }
           else if (msg.type === 'reply.audio') {
-            // Decode base64 PCM16 and schedule playback
             const raw = atob(msg.data);
             const pcm16 = new Int16Array(raw.length / 2);
             for (let i = 0; i < pcm16.length; i++) {
@@ -250,133 +400,184 @@ Behavior rules:
             playbackTime = Math.max(playbackTime, now);
             src.start(playbackTime);
             playbackTime += buffer.duration;
+            scheduledSources.push(src);
+            src.onended = () => {
+              scheduledSources = scheduledSources.filter(s => s !== src);
+            };
           }
           else if (msg.type === 'reply.done' && msg.status === 'interrupted') {
-            playbackTime = audioCtx.currentTime;
+            // Caller barged in: silence audio already queued for the old reply
+            stopPlayback();
           }
           else if (msg.type === 'transcript.user') {
             addLog('You: ' + msg.text, 'you');
-            // Relay caller's speech to phone
-            relayToPhone('TRANSCRIPT_UPDATE', { speaker: 'caller', text: msg.text });
+            if (relayWs && relayWs.readyState === WebSocket.OPEN) {
+              relayWs.send(JSON.stringify({
+                type: 'TRANSCRIPT_UPDATE',
+                callId: currentCallId,
+                speaker: 'Caller',
+                text: msg.text,
+              }));
+            }
           }
           else if (msg.type === 'transcript.agent') {
-            addLog('Agent: ' + msg.text, 'agent');
-            // Relay agent's speech to phone
-            relayToPhone('TRANSCRIPT_UPDATE', { speaker: 'agent', text: msg.text });
+            addLog('Secretary: ' + msg.text, 'agent');
+            if (relayWs && relayWs.readyState === WebSocket.OPEN) {
+              relayWs.send(JSON.stringify({
+                type: 'TRANSCRIPT_UPDATE',
+                callId: currentCallId,
+                speaker: 'Secretary',
+                text: msg.text,
+              }));
+            }
+
+            const d = pendingDirective;
+            if (d && d.replyId && msg.reply_id === d.replyId) {
+              if (msg.interrupted) {
+                retryOrFailDirective('interrupted_by_caller');
+              } else {
+                clearTimeout(d.timer);
+                pendingDirective = null;
+                reportDirective('DIRECTIVE_STATE', { state: 'spoken', version: d.version });
+              }
+            }
           }
           else if (msg.type === 'session.error' || msg.type === 'error') {
-            addLog('Error: ' + (msg.message || JSON.stringify(msg)), '');
-            updateStatus('Error', 'disconnected');
+            // D1: Surface AssemblyAI error frames verbatim in UI
+            const errDetails = [msg.code, msg.message, msg.param && `(field: ${msg.param})`]
+              .filter(Boolean).join(' — ') || JSON.stringify(msg);
+            addLog('⚠️ AssemblyAI Error: ' + errDetails, 'error');
+            if (!ready) updateStatus('Error', 'disconnected');
           }
           else if (msg.type === 'session.ended') {
+            addLog('Session ended by server.', '');
             cleanup();
           }
         });
 
-        aaiWs.addEventListener('close', () => {
-          if (ready) {
-            updateStatus('Call Ended', 'disconnected');
-            ready = false;
-          }
+        aaiWs.addEventListener('close', (e) => {
+          if (!aaiWs) return; // closed by cleanup()
+          addLog(`AssemblyAI connection closed (code ${e.code}${e.reason ? ': ' + e.reason : ''}).`, ready ? '' : 'error');
+          cleanup(ready ? 'Call Ended' : 'Failed to connect');
         });
 
         aaiWs.addEventListener('error', () => {
-          addLog('Connection error. Check your API key and network.', '');
-          updateStatus('Connection Error', 'disconnected');
+          // The close event that follows carries the code and reason
+          addLog('AssemblyAI WebSocket connection error.', 'error');
         });
 
-        // 5. Connect to relay server FIRST (so it's ready before transcripts arrive)
-        const relayProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        relayWs = new WebSocket(`${relayProtocol}//${window.location.host}`);
-        relayWs.onopen = () => console.log('[Relay] Connected to gateway server');
-        relayWs.onmessage = (event) => {
-          try {
-            const msg = JSON.parse(event.data);
-            if (msg.type === 'DIRECTIVE_UPDATED') {
-              const { action, spokenDirective } = msg.data;
-              let promptToSpeak = '';
-
-              if (action === 'holding') {
-                addLog('⏳ Kabeer requested a 2-minute hold...', 'agent');
-                promptToSpeak = "Tell the caller warmly: 'Kabeer asked if you could please hold on the line for 2 minutes while he finishes up.'";
-              } else if (action === 'patchedToMaster') {
-                addLog('📞 Kabeer is joining the call...', 'agent');
-                promptToSpeak = "Tell the caller: 'Kabeer is joining our call right now.'";
-              } else if (action === 'declined') {
-                addLog('📵 Kabeer is unavailable right now.', 'agent');
-                promptToSpeak = "Tell the caller politely: 'Kabeer is unavailable at the moment, but I have noted your details and he will get back to you.' Then say goodbye.";
-              } else if (spokenDirective) {
-                addLog('💬 Kabeer directive: ' + spokenDirective, 'agent');
-                promptToSpeak = `Tell the caller this message from Kabeer: "${spokenDirective}"`;
-              }
-
-              // Send prompt injection to AssemblyAI Voice Agent so it SPEAKS it to the caller over audio!
-              if (promptToSpeak && aaiWs && aaiWs.readyState === WebSocket.OPEN) {
-                aaiWs.send(JSON.stringify({
-                  type: 'input.text',
-                  text: `[IMPORTANT DIRECTIVE FROM KABEER]: ${promptToSpeak}`
-                }));
-              }
-            }
-          } catch(e) {
-            console.error('[Relay] Message handling error:', e);
-          }
-        };
-
-        // 6. Notify mobile app via our server & store callId
-        try {
-          const callRes = await fetch('/api/call', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ callerName: 'Web Caller', topic: 'Voice Call' }),
-          });
-          const callData = await callRes.json();
-          currentCallId = callData.callId || null;
-          console.log('[Call] Registered with callId:', currentCallId);
-        } catch(e) {
-          console.warn('[Call] Failed to register call:', e);
-        }
-
       } catch (err) {
-        addLog('Error: ' + err.message, '');
-        updateStatus('Failed to connect', 'disconnected');
+        addLog('Error: ' + err.message, 'error');
         console.error(err);
+        cleanup('Failed to connect');
       }
     }
 
+    function stopPlayback() {
+      for (const s of scheduledSources) {
+        try { s.stop(); } catch (_) {}
+      }
+      scheduledSources = [];
+      if (audioCtx) playbackTime = audioCtx.currentTime;
+    }
+
+    function buildDirectiveInstructions(action, spokenDirective) {
+      const voiceRule = " Speak as Kabeer's secretary and refer to Kabeer in the third person.";
+      if (action === 'holding') {
+        return 'Kabeer has asked the caller to hold for about two minutes. Tell the caller this politely now.' + voiceRule;
+      }
+      if (action === 'patchedToMaster') {
+        return 'Kabeer has decided to take this call. Tell the caller now that you are connecting them to Kabeer and ask them to stay on the line.' + voiceRule;
+      }
+      if (action === 'declined') {
+        return 'Kabeer is not available right now. Tell the caller politely that he is unavailable, that you have noted their name and reason for calling, and that he will get back to them. Then say goodbye.' + voiceRule;
+      }
+      const clean = sanitizeDirective(spokenDirective);
+      if (!clean) return '';
+      return `Kabeer has sent you this message to pass on to the caller: "${clean}". Relay it to the caller now in your own words. If it is written from Kabeer's point of view (using "I" or "me"), convert it so you are talking about Kabeer.` + voiceRule;
+    }
+
+    function reportDirective(type, fields) {
+      if (relayWs && relayWs.readyState === WebSocket.OPEN) {
+        relayWs.send(JSON.stringify({ type, callId: currentCallId, ...fields }));
+      }
+    }
+
+    // reply.create makes the agent speak now without touching the system
+    // prompt, so the secretary persona stays intact across directives.
+    function sendDirective(instructions, version) {
+      if (!aaiWs) {
+        reportDirective('DIRECTIVE_FAILED', { reason: 'call_not_connected', version });
+        return;
+      }
+      if (pendingDirective) clearTimeout(pendingDirective.timer);
+      pendingDirective = { version, instructions, attempts: 0, replyId: null, awaitingReply: false, timer: null };
+      reportDirective('DIRECTIVE_STATE', { state: 'injected', version });
+      // Before session.ready the directive waits; the session.ready handler sends it
+      if (ready) dispatchDirective();
+    }
+
+    function dispatchDirective() {
+      const d = pendingDirective;
+      if (!d || !aaiWs || aaiWs.readyState !== WebSocket.OPEN) return;
+      d.attempts++;
+      d.replyId = null;
+      d.awaitingReply = true;
+      aaiWs.send(JSON.stringify({ type: 'reply.create', instructions: d.instructions }));
+      clearTimeout(d.timer);
+      d.timer = setTimeout(() => {
+        if (pendingDirective === d) retryOrFailDirective('timeout_no_agent_speech');
+      }, 10000);
+    }
+
+    function retryOrFailDirective(reason) {
+      const d = pendingDirective;
+      if (!d) return;
+      if (d.attempts < 2 && aaiWs && aaiWs.readyState === WebSocket.OPEN) {
+        console.warn(`[Directive] ${reason}; retrying once`);
+        dispatchDirective();
+        return;
+      }
+      clearTimeout(d.timer);
+      pendingDirective = null;
+      console.error(`[Directive] Failed: ${reason}`);
+      reportDirective('DIRECTIVE_FAILED', { reason, version: d.version });
+    }
+
     function endCall() {
-      if (aaiWs && aaiWs.readyState === WebSocket.OPEN) {
+      if (ready && aaiWs && aaiWs.readyState === WebSocket.OPEN) {
         aaiWs.send(JSON.stringify({ type: 'session.end' }));
+        // Don't leave the caller stuck if session.ended never arrives
+        setTimeout(() => { if (aaiWs) cleanup(); }, 3000);
       } else {
         cleanup();
       }
     }
 
-    function cleanup() {
+    function cleanup(reason) {
       ready = false;
-      aaiWs?.close();
-      relayWs?.close();
-      stream?.getTracks().forEach(t => t.stop());
-      audioCtx?.close();
+      if (pendingDirective) {
+        clearTimeout(pendingDirective.timer);
+        pendingDirective = null;
+      }
+      if (sessionTimer) clearTimeout(sessionTimer);
+      stopPlayback();
+      // Null the globals before closing so the close handlers see a finished call
+      const oldAaiWs = aaiWs;
+      const oldRelayWs = relayWs;
       aaiWs = null;
       relayWs = null;
+      oldAaiWs?.close();
+      oldRelayWs?.close();
+      stream?.getTracks().forEach(t => t.stop());
+      audioCtx?.close();
       audioCtx = null;
       stream = null;
-      updateStatus('Call Ended', 'disconnected');
+      updateStatus(reason || 'Call Ended', 'disconnected');
       document.getElementById('callSubtitle').innerText = 'The call has ended.';
       document.getElementById('avatar').style.animation = 'none';
     }
 
-    function updateStatus(text, state) {
-      const dot = document.getElementById('statusDot');
-      dot.className = 'status-dot ' + state;
-      const statusEl = document.getElementById('callStatus');
-      statusEl.innerHTML = '';
-      statusEl.appendChild(dot);
-      statusEl.appendChild(document.createTextNode(' ' + text));
-    }
-
-    // Cleanup on tab close
     window.addEventListener('pagehide', () => {
       if (aaiWs && aaiWs.readyState === WebSocket.OPEN) {
         aaiWs.send(JSON.stringify({ type: 'session.end' }));
