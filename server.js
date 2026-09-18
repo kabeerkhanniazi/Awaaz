@@ -219,6 +219,89 @@ function mergeCallerDetails(call, raw) {
   return changed;
 }
 
+// --- Post-call analysis ---------------------------------------------------------
+
+// AssemblyAI's LLM Gateway (OpenAI-compatible); a fast model is plenty here
+const LLM_GATEWAY_URL = 'https://llm-gateway.assemblyai.com/v1/chat/completions';
+// Override with SUMMARY_MODEL once the AssemblyAI account has access to more models
+const SUMMARY_MODEL = process.env.SUMMARY_MODEL || 'qwen3.5-4b-32k-fast';
+
+async function analyzeWithLlm(transcript, caller) {
+  if (!ASSEMBLYAI_KEY || !transcript.length) return null;
+  const lines = transcript
+    .slice(-150)
+    .map(t => `${t.speaker === 'Master' ? 'Kabeer' : String(t.speaker || 'Caller')}: ${String(t.text || '').slice(0, 500)}`)
+    .join('\n');
+  const known = ['name', 'company', 'reason']
+    .filter(k => caller[k])
+    .map(k => `${k}: ${String(caller[k]).slice(0, 200)}`)
+    .join('\n');
+
+  const prompt = `This is a phone call screened by Kabeer's secretary. "Kabeer" lines are his private instructions to her.
+${known ? `\nConfirmed caller details:\n${known}\n` : ''}
+Transcript:
+${lines}
+
+Reply with only a JSON object, no other text:
+{"summary": one sentence for Kabeer's call log saying who called and why (use the caller's name if known),
+ "actionItem": the single most important follow-up for Kabeer as a short to-do, or null if there is none,
+ "sentiment": a number from -1 (angry or distressed) to 1 (very positive)}`;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+  const request = () => fetch(LLM_GATEWAY_URL, {
+    method: 'POST',
+    headers: { authorization: ASSEMBLYAI_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: SUMMARY_MODEL,
+      messages: [{ role: 'user', content: prompt }],
+      max_tokens: 300,
+    }),
+    signal: controller.signal,
+  });
+  try {
+    let res = await request();
+    if (res.status === 429) {
+      // Rate limited: one retry after a short pause
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      res = await request();
+    }
+    if (!res.ok) throw new Error(`LLM gateway HTTP ${res.status}`);
+    const data = await res.json();
+    const content = String(data?.choices?.[0]?.message?.content || '');
+    const json = JSON.parse(content.slice(content.indexOf('{'), content.lastIndexOf('}') + 1));
+    const tidy = (value) => String(value || '').trim().replace(/[\s,;:]+$/, '');
+    const summary = tidy(json.summary);
+    if (!summary) throw new Error('empty summary');
+    const actionItem = json.actionItem ? tidy(json.actionItem) || null : null;
+    const sentiment = Math.max(-1, Math.min(1, Number(json.sentiment) || 0));
+    return { summary: summary.slice(0, 300), actionItem: actionItem ? actionItem.slice(0, 200) : null, sentimentScore: sentiment };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Fallback when the LLM is unavailable
+function analyzeWithKeywords(transcript) {
+  const lower = transcript.map(t => `${t.speaker}: ${t.text}`).join(' ').toLowerCase();
+  let sentiment = 0;
+  if (/urgent|emergency|important/.test(lower)) sentiment += 0.2;
+  if (/great|thank|pleasure|wonderful/.test(lower)) sentiment += 0.5;
+  if (/problem|issue|frustrated|cancel/.test(lower)) sentiment -= 0.6;
+
+  const firstCallerTurn = transcript.find(t => String(t.speaker || '').toLowerCase() === 'caller' && t.text);
+  const summary = firstCallerTurn
+    ? `Caller said: "${String(firstCallerTurn.text).slice(0, 120)}"`
+    : 'Call screened by your secretary.';
+
+  let actionItem = null;
+  if (/call back|callback|reach out/.test(lower)) actionItem = 'Call the caller back.';
+  else if (/send|email|document/.test(lower)) actionItem = 'Send the caller the documents they asked for.';
+  else if (/meeting|schedule/.test(lower)) actionItem = 'Schedule a meeting with the caller.';
+
+  return { summary, actionItem, sentimentScore: Math.max(-1, Math.min(1, sentiment)) };
+}
+
 // Locate canonical web directory
 const webDir = fs.existsSync(path.join(__dirname, 'web'))
   ? path.join(__dirname, 'web')
@@ -376,51 +459,33 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // POST /api/analyze-call — Real-call LeMUR / intelligence gap (C8)
+  // POST /api/analyze-call — summary, follow-up and sentiment for a finished
+  // call. Uses an LLM (it costs money), so only Kabeer's phone may call it.
   if (pathname === '/api/analyze-call' && req.method === 'POST') {
-    readBody(req, res, MAX_ANALYZE_BODY_BYTES, (body) => {
+    if (!secretMatches(req.headers['x-awaaz-secret'])) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Unauthorized' }));
+      return;
+    }
+    readBody(req, res, MAX_ANALYZE_BODY_BYTES, async (body) => {
+      let payload;
       try {
-        const payload = JSON.parse(body);
-        const transcripts = payload.transcript || [];
-        const fullText = transcripts.map(t => `${t.speaker}: ${t.text}`).join(' ');
-
-        // Basic sentiment analysis heuristic based on conversational text
-        let sentiment = 0.0;
-        const lower = fullText.toLowerCase();
-        if (lower.includes('urgent') || lower.includes('emergency') || lower.includes('important')) sentiment += 0.2;
-        if (lower.includes('great') || lower.includes('thank') || lower.includes('pleasure') || lower.includes('wonderful')) sentiment += 0.5;
-        if (lower.includes('problem') || lower.includes('issue') || lower.includes('frustrated') || lower.includes('cancel')) sentiment -= 0.6;
-        sentiment = Math.max(-1.0, Math.min(1.0, sentiment));
-
-        // Derive summary
-        let summary = 'Caller contacted the office regarding an inquiry.';
-        if (transcripts.length > 0) {
-          const firstCallerTurn = transcripts.find(t => (t.speaker || '').toLowerCase() === 'caller');
-          if (firstCallerTurn && firstCallerTurn.text) {
-            summary = `Caller contacted regarding: "${firstCallerTurn.text.substring(0, 100)}".`;
-          }
-        }
-
-        // Derive action item if commitments detected
-        let actionItem = null;
-        if (lower.includes('call back') || lower.includes('callback') || lower.includes('reach out')) {
-          actionItem = 'Follow up with caller as requested.';
-        } else if (lower.includes('send') || lower.includes('email') || lower.includes('document')) {
-          actionItem = 'Send required documentation to caller.';
-        } else if (lower.includes('meeting') || lower.includes('schedule')) {
-          actionItem = 'Coordinate calendar meeting with caller.';
-        }
-
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-          summary,
-          actionItem,
-          sentimentScore: sentiment,
-        }));
-      } catch (e) {
+        payload = JSON.parse(body);
+      } catch {
         res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Failed to analyze transcript' }));
+        res.end(JSON.stringify({ error: 'Invalid JSON' }));
+        return;
       }
+      const transcript = Array.isArray(payload.transcript) ? payload.transcript : [];
+      const caller = payload.caller && typeof payload.caller === 'object' ? payload.caller : {};
+      let analysis = null;
+      try {
+        analysis = await analyzeWithLlm(transcript, caller);
+      } catch (e) {
+        console.warn(`[Analyze] LLM summary failed, using keywords: ${e.message}`);
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(analysis || analyzeWithKeywords(transcript)));
     });
     return;
   }
