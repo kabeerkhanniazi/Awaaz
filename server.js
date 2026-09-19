@@ -84,7 +84,10 @@ function scheduleTakeMessage(callId, delay = TAKE_MESSAGE_AFTER_MS) {
       return;
     }
     current.tookMessage = true;
-    callerWs.send(JSON.stringify({ type: 'TAKE_MESSAGE' }));
+    // "He's on another call" is kinder than "he can't take your call"
+    const busy = [...activeCalls.values()].some(c => c.callId !== callId &&
+      (bridgeMobile.has(c.callId) || masterSessions.get(c.callId)?.kabeerEngaged));
+    callerWs.send(JSON.stringify({ type: 'TAKE_MESSAGE', reason: busy ? 'busy' : 'unavailable' }));
     broadcastToMobile({ type: 'TAKING_MESSAGE', callId });
     console.log(`[Call] ${callId} unanswered; secretary is taking a message`);
   }, delay);

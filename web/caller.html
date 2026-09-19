@@ -362,8 +362,11 @@
                     },
                   }));
                 }
+                const why = msg.reason === 'busy'
+                  ? 'Kabeer is on another call right now.'
+                  : "Kabeer can't take the call right now.";
                 sendDirective(
-                  "Kabeer can't take the call right now. Tell the caller this politely and offer to take a message: " +
+                  why + ' Tell the caller this politely and offer to take a message: ' +
                   'ask what they would like him to know and how or when to call them back. Speak as his secretary.',
                   0,
                 );
